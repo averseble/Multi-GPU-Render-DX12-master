@@ -6,6 +6,8 @@
 #include "CameraController.h"
 #include "CrossAdapterParticleEmitter.h"
 #include "GameObject.h"
+#include "GCommandQueue.h"
+#include "GDescriptorHeap.h"
 #include "GDeviceFactory.h"
 #include "GModel.h"
 #include "imgui.h"
@@ -20,6 +22,24 @@
 #include "Window.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+void HybridParticleApp_ImGuiSrvAllocFn(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
+                                       D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle)
+{
+    auto* app = static_cast<HybridParticleApp*>(info->UserData);
+    IM_ASSERT(app != nullptr && !app->imguiFontDescriptorInUse);
+    app->imguiFontDescriptorInUse = true;
+    *out_cpu_handle = app->imguiSrvDescriptors.GetCPUHandle(0);
+    *out_gpu_handle = app->imguiSrvDescriptors.GetGPUHandle(0);
+}
+
+void HybridParticleApp_ImGuiSrvFreeFn(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE)
+{
+    auto* app = static_cast<HybridParticleApp*>(info->UserData);
+    IM_ASSERT(app != nullptr && app->imguiFontDescriptorInUse);
+    app->imguiFontDescriptorInUse = false;
+}
 
 namespace
 {
@@ -953,11 +973,11 @@ void HybridParticleApp::CreateGO()
     crossEmitter.push_back(emitter.get());
     gameObjects.push_back(std::move(particle));
     
-    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜:
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½:
     //auto grassField = std::make_unique<GameObject>("Grass Field");
     //grassField->GetTransform()->SetPosition(Vector3::Up);
     //grassField->SetScale(6.5f);
-    //auto grassEmitter = std::make_shared<GrassEmitter>(primeDevice, 5000, 200.0f); // 50k ˜˜˜˜˜˜˜˜
+    //auto grassEmitter = std::make_shared<GrassEmitter>(primeDevice, 5000, 200.0f); // 50k ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     //grassField->AddComponent(grassEmitter);
     //typedRenderer[static_cast<int>(RenderMode::Particle)].push_back(grassEmitter);
     //gameObjects.push_back(std::move(grassField));
@@ -968,7 +988,7 @@ void HybridParticleApp::CreateGO()
     auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice, 5000, 200.0f);
     grassField->AddComponent(grassEmitter);
     typedRenderer[static_cast<int>(RenderMode::Transparent)].push_back(grassEmitter);
-    crossGrassEmitters.push_back(grassEmitter.get()); // ˜˜˜˜ ˜˜˜˜˜ ˜˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜˜˜˜˜
+    crossGrassEmitters.push_back(grassEmitter.get()); // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     gameObjects.push_back(std::move(grassField));
 
      auto platform = std::make_unique<GameObject>();
@@ -1497,10 +1517,26 @@ void HybridParticleApp::InitImGui()
 
     imguiSrvDescriptors = primeDevice->AllocateDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                                                          globalCountFrameResources);
+    imguiFontDescriptorInUse = false;
+
     ImGui_ImplWin32_Init(MainWindow->GetWindowHandle());
-    ImGui_ImplDX12_Init(primeDevice->GetDXDevice().Get(), globalCountFrameResources,
-                        DXGI_FORMAT_R8G8B8A8_UNORM, imguiSrvDescriptors.GetDescriptorHeap()->GetDirectxHeap(),
-                        imguiSrvDescriptors.GetCPUHandle(), imguiSrvDescriptors.GetGPUHandle());
+
+    ImGui_ImplDX12_InitInfo init_info = {};
+    init_info.Device = primeDevice->GetDXDevice().Get();
+    init_info.CommandQueue = primeDevice->GetCommandQueue(GQueueType::Graphics)->GetD3D12CommandQueue().Get();
+    init_info.NumFramesInFlight = globalCountFrameResources;
+    init_info.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    init_info.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    init_info.UserData = this;
+    {
+        const std::shared_ptr<GDescriptorHeap> heap = imguiSrvDescriptors.GetDescriptorHeap();
+        init_info.SrvDescriptorHeap = heap->GetDirectxHeap();
+    }
+
+    init_info.SrvDescriptorAllocFn = HybridParticleApp_ImGuiSrvAllocFn;
+    init_info.SrvDescriptorFreeFn = HybridParticleApp_ImGuiSrvFreeFn;
+
+    ImGui_ImplDX12_Init(&init_info);
     ImGui_ImplDX12_CreateDeviceObjects();
     imguiInitialized = true;
 }

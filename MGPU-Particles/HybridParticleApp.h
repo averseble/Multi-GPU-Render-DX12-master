@@ -15,6 +15,9 @@
 #include "GDeviceFactory.h"
 #include "GDescriptor.h"
 #include "Light.h"
+#include <d3d12.h>
+
+struct ImGui_ImplDX12_InitInfo;
 
 class HybridParticleApp :
     public Common::D3DApp
@@ -158,4 +161,13 @@ protected:
     DXGI_ADAPTER_DESC3 secondAdapterDesc{};
     bool primeAdapterDescValid = false;
     bool secondAdapterDescValid = false;
+
+    bool imguiFontDescriptorInUse = false;
+
+    friend void HybridParticleApp_ImGuiSrvAllocFn(ImGui_ImplDX12_InitInfo* info,
+                                                  D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
+                                                  D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle);
+    friend void HybridParticleApp_ImGuiSrvFreeFn(ImGui_ImplDX12_InitInfo* info,
+                                                 D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle,
+                                                 D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle);
 };
