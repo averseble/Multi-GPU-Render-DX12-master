@@ -9,6 +9,8 @@
 #include "GDeviceFactory.h"
 #include "GModel.h"
 #include "imgui.h"
+#include "imgui_impl_dx12.h"
+#include "imgui_impl_win32.h"
 #include "MathHelper.h"
 #include "ModelRenderer.h"
 #include "ParticleEmitter.h"
@@ -16,6 +18,52 @@
 #include "SkyBox.h"
 #include "Transform.h"
 #include "Window.h"
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+namespace
+{
+    const char* IntegratedDiscreteLabel(const DXGI_ADAPTER_DESC3& d)
+    {
+        constexpr UINT64 halfGb = 512ull * 1024 * 1024;
+        if (d.DedicatedVideoMemory >= halfGb)
+            return "Discrete-class (high dedicated VRAM)";
+        if (d.DedicatedVideoMemory == 0)
+            return "Integrated-class (no dedicated VRAM)";
+        return "Hybrid / mixed (low dedicated VRAM)";
+    }
+
+    void ImGuiGpuSection(const char* sectionTitle, const char* workloadRole,
+                         const std::shared_ptr<GDevice>& device,
+                         const bool descValid, const DXGI_ADAPTER_DESC3& desc,
+                         const UINT64 renderTimeTicks, const UINT64 computeTimeTicks)
+    {
+        ImGui::SeparatorText(sectionTitle);
+        ImGui::Text("Workload: %s", workloadRole);
+        ImGui::Text("D3D12 name: %ls", device->GetName().c_str());
+        if (descValid)
+        {
+            ImGui::Text("DXGI description: %ls", desc.Description);
+            ImGui::Text("%s", IntegratedDiscreteLabel(desc));
+            ImGui::Text("Dedicated GPU memory: %.1f MB",
+                        static_cast<double>(desc.DedicatedVideoMemory) / (1024.0 * 1024.0));
+            ImGui::Text("Dedicated system memory: %.1f MB",
+                        static_cast<double>(desc.DedicatedSystemMemory) / (1024.0 * 1024.0));
+            ImGui::Text("Shared system memory: %.1f MB",
+                        static_cast<double>(desc.SharedSystemMemory) / (1024.0 * 1024.0));
+            ImGui::Text("VendorId: 0x%04X  DeviceId: 0x%04X", desc.VendorId, desc.DeviceId);
+            ImGui::Text("Adapter flags: 0x%X", static_cast<unsigned>(desc.Flags));
+        }
+        else
+        {
+            ImGui::TextUnformatted("Extended DXGI adapter info unavailable.");
+        }
+        ImGui::Text("Cross-adapter resource sharing: %s",
+                    device->IsCrossAdapterTextureSupported() ? "yes" : "no");
+        ImGui::Text("GPU timestamp (render path): %llu", renderTimeTicks);
+        ImGui::Text("GPU timestamp (compute path): %llu", computeTimeTicks);
+    }
+}
 
 HybridParticleApp::HybridParticleApp(const HINSTANCE hInstance): D3DApp(hInstance)
 {
@@ -25,6 +73,7 @@ HybridParticleApp::HybridParticleApp(const HINSTANCE hInstance): D3DApp(hInstanc
 
 HybridParticleApp::~HybridParticleApp()
 {
+    ShutdownImGui();
 }
 
 void HybridParticleApp::Update(const GameTimer& gt)
@@ -312,6 +361,7 @@ void HybridParticleApp::Draw(const GameTimer& gt)
         PopulateDrawFullQuadTexture(cmdList, antiAliasingPrimePath->GetSRV(),
                                     0, *defaultPrimePipelineResources.GetPSO(RenderMode::Quad));
 
+        DrawImGui(cmdList);
 
         cmdList->TransitionBarrier(MainWindow->GetCurrentBackBuffer(), D3D12_RESOURCE_STATE_PRESENT);
         cmdList->FlushResourceBarriers();
@@ -371,6 +421,8 @@ bool HybridParticleApp::Initialize()
 
     Flush();
 
+    InitImGui();
+
     return true;
 }
 
@@ -417,6 +469,9 @@ void HybridParticleApp::InitDevices()
     logQueue.Push(
         L"\t\n Cross Adapter Texture Support: " + std::to_wstring(
             secondDevice->IsCrossAdapterTextureSupported()));
+
+    primeAdapterDescValid = primeDevice->TryGetAdapterDesc3(primeAdapterDesc);
+    secondAdapterDescValid = secondDevice->TryGetAdapterDesc3(secondAdapterDesc);
 }
 
 void HybridParticleApp::InitFrameResource()
@@ -898,11 +953,11 @@ void HybridParticleApp::CreateGO()
     crossEmitter.push_back(emitter.get());
     gameObjects.push_back(std::move(particle));
     
-    // Äîáàâëÿåì òðàâó:
+    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜:
     //auto grassField = std::make_unique<GameObject>("Grass Field");
     //grassField->GetTransform()->SetPosition(Vector3::Up);
     //grassField->SetScale(6.5f);
-    //auto grassEmitter = std::make_shared<GrassEmitter>(primeDevice, 5000, 200.0f); // 50k òðàâèíîê
+    //auto grassEmitter = std::make_shared<GrassEmitter>(primeDevice, 5000, 200.0f); // 50k ˜˜˜˜˜˜˜˜
     //grassField->AddComponent(grassEmitter);
     //typedRenderer[static_cast<int>(RenderMode::Particle)].push_back(grassEmitter);
     //gameObjects.push_back(std::move(grassField));
@@ -913,7 +968,7 @@ void HybridParticleApp::CreateGO()
     auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice, 5000, 200.0f);
     grassField->AddComponent(grassEmitter);
     typedRenderer[static_cast<int>(RenderMode::Transparent)].push_back(grassEmitter);
-    crossGrassEmitters.push_back(grassEmitter.get()); // åñëè íóæåí ñïèñîê äëÿ óïðàâëåíèÿ
+    crossGrassEmitters.push_back(grassEmitter.get()); // ˜˜˜˜ ˜˜˜˜˜ ˜˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜˜˜˜˜
     gameObjects.push_back(std::move(grassField));
 
      auto platform = std::make_unique<GameObject>();
@@ -1431,8 +1486,71 @@ void HybridParticleApp::Flush()
     secondDevice->Flush();
 }
 
+void HybridParticleApp::InitImGui()
+{
+    if (!MainWindow || !primeDevice)
+        return;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+
+    imguiSrvDescriptors = primeDevice->AllocateDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                                         globalCountFrameResources);
+    ImGui_ImplWin32_Init(MainWindow->GetWindowHandle());
+    ImGui_ImplDX12_Init(primeDevice->GetDXDevice().Get(), globalCountFrameResources,
+                        DXGI_FORMAT_R8G8B8A8_UNORM, imguiSrvDescriptors.GetDescriptorHeap()->GetDirectxHeap(),
+                        imguiSrvDescriptors.GetCPUHandle(), imguiSrvDescriptors.GetGPUHandle());
+    ImGui_ImplDX12_CreateDeviceObjects();
+    imguiInitialized = true;
+}
+
+void HybridParticleApp::ShutdownImGui()
+{
+    if (!imguiInitialized)
+        return;
+
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    imguiSrvDescriptors = GDescriptor();
+    imguiInitialized = false;
+}
+
+void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
+{
+    if (!imguiInitialized || !cmdList)
+        return;
+
+    cmdList->SetDescriptorsHeap(&imguiSrvDescriptors);
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    if (ImGui::Begin("Hybrid GPU / adapter statistics", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Cross-adapter compute: %s", UseCrossAdapter ? "on (second GPU)" : "off (prime GPU)");
+        ImGui::Text("Cross-adapter sync fences: %s", UseCrossSync ? "on" : "off");
+        ImGui::Separator();
+        ImGuiGpuSection("Prime adapter", "Scene render + window present",
+                        primeDevice, primeAdapterDescValid, primeAdapterDesc,
+                        primeGPURenderingTime, primeGPUComputingTime);
+        ImGuiGpuSection("Second adapter",
+                        UseCrossAdapter ? "Compute (particles / grass)" : "Compute (same GPU as prime)",
+                        secondDevice, secondAdapterDescValid, secondAdapterDesc,
+                        secondGPURenderingTime, secondGPUComputingTime);
+    }
+    ImGui::End();
+
+    ImGui::Render();
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList->GetGraphicsCommandList().Get());
+}
+
 LRESULT HybridParticleApp::MsgProc(const HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam)
 {
+    if (imguiInitialized && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+        return true;
+
     switch (msg)
     {
     case WM_INPUT:

@@ -21,6 +21,16 @@ namespace PEPEngine::Graphics
         return crossAdapterTextureSupport;
     }
 
+    bool GDevice::TryGetAdapterDesc3(DXGI_ADAPTER_DESC3& outDesc) const
+    {
+        ComPtr<IDXGIAdapter4> adapter4;
+        if (!adapter || FAILED(adapter.As(&adapter4)))
+        {
+            return false;
+        }
+        return SUCCEEDED(adapter4->GetDesc3(&outDesc));
+    }
+
     void GDevice::SharedFence(ComPtr<ID3D12Fence>& primaryFence, const std::shared_ptr<GDevice>& sharedDevice,
                               ComPtr<ID3D12Fence>& sharedFence, const UINT64 fenceValue,
                               const SECURITY_ATTRIBUTES* attributes,

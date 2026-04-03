@@ -104,5 +104,7 @@ namespace PEPEngine::Graphics
         {
             return name;
         }
+
+        bool TryGetAdapterDesc3(DXGI_ADAPTER_DESC3& outDesc) const;
     };
 }

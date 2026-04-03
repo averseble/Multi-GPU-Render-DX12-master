@@ -13,6 +13,7 @@
 #include "FrameResource.h"
 #include "GCrossAdapterResource.h"
 #include "GDeviceFactory.h"
+#include "GDescriptor.h"
 #include "Light.h"
 
 class HybridParticleApp :
@@ -65,6 +66,10 @@ protected:
     void OnResize() override;
     void Flush() override;
     LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
+
+    void InitImGui();
+    void ShutdownImGui();
+    void DrawImGui(const std::shared_ptr<GCommandList>& cmdList);
 
     std::shared_ptr<GDevice> primeDevice;
     std::shared_ptr<GDevice> secondDevice;
@@ -146,4 +151,11 @@ protected:
     Vector3 mRotatedLightDirections[3];
 
     DirectX::BoundingSphere mSceneBounds;
+
+    GDescriptor imguiSrvDescriptors;
+    bool imguiInitialized = false;
+    DXGI_ADAPTER_DESC3 primeAdapterDesc{};
+    DXGI_ADAPTER_DESC3 secondAdapterDesc{};
+    bool primeAdapterDescValid = false;
+    bool secondAdapterDescValid = false;
 };
