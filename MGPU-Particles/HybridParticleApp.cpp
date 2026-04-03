@@ -965,14 +965,14 @@ void HybridParticleApp::CreateGO()
 //     }
 
     
-    auto particle = std::make_unique<GameObject>();
+   /* auto particle = std::make_unique<GameObject>();
     particle->GetTransform()->SetPosition(Vector3::Up);
     const auto emitter = std::make_shared<CrossAdapterParticleEmitter>(primeDevice, secondDevice, 100000 * 1);
     particle->AddComponent(emitter);
     typedRenderer[static_cast<int>(RenderMode::Particle)].push_back(emitter);
     crossEmitter.push_back(emitter.get());
     gameObjects.push_back(std::move(particle));
-    
+    */
     // ��������� �����:
     //auto grassField = std::make_unique<GameObject>("Grass Field");
     //grassField->GetTransform()->SetPosition(Vector3::Up);
