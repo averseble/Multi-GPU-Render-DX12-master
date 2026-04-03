@@ -1052,6 +1052,15 @@ void HybridParticleApp::CreateGO()
     typedRenderer[static_cast<int>(RenderMode::Opaque)].push_back(renderer);
     gameObjects.push_back(std::move(desertDragon));
 
+    for (auto* emitter : crossEmitter)
+    {
+        emitter->EnableShared();
+    }
+    for (auto* emitter : crossGrassEmitters)
+    {
+        emitter->EnableShared();
+    }
+
     //logQueue.Push(std::wstring(L"\nFinish create GO"));
 }
 
