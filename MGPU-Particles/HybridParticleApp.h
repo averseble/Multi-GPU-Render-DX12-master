@@ -167,6 +167,8 @@ protected:
     float grassLod0Distance = 350.0f;
     int grassLod0BaseSegments = 4;
     float grassWindTessellationScale = 4.0f;
+    bool fpsLimitEnabled = true;
+    int fpsLimitTarget = 60;
 
     friend void HybridParticleApp_ImGuiSrvAllocFn(ImGui_ImplDX12_InitInfo* info,
                                                   D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,

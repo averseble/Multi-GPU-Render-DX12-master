@@ -1,8 +1,10 @@
 #include "HybridParticleApp.h"
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include "CameraController.h"
 #include "CrossAdapterParticleEmitter.h"
 #include "GameObject.h"
@@ -1254,6 +1256,8 @@ int HybridParticleApp::Run()
         // Otherwise, do animation/game stuff.
         else
         {
+            const auto frameStart = std::chrono::steady_clock::now();
+
             if (IsStop)
             {
                 MainWindow->SetWindowTitle(MainWindow->GetWindowName() + L" Finished. Wait...");
@@ -1277,6 +1281,16 @@ int HybridParticleApp::Run()
 
             primeDevice->ResetAllocators(frameCount);
             secondDevice->ResetAllocators(frameCount);
+
+            if (fpsLimitEnabled && fpsLimitTarget > 0)
+            {
+                const auto frameBudget = std::chrono::duration<double>(1.0 / static_cast<double>(fpsLimitTarget));
+                const auto frameElapsed = std::chrono::steady_clock::now() - frameStart;
+                if (frameElapsed < frameBudget)
+                {
+                    std::this_thread::sleep_for(frameBudget - frameElapsed);
+                }
+            }
         }
     }
 
@@ -1584,6 +1598,9 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
     {
         ImGui::Text("Cross-adapter compute: %s", UseCrossAdapter ? "on (second GPU)" : "off (prime GPU)");
         ImGui::Text("Cross-adapter sync fences: %s", UseCrossSync ? "on" : "off");
+        ImGui::SeparatorText("Frame limiter");
+        ImGui::Checkbox("Enable FPS limit", &fpsLimitEnabled);
+        ImGui::SliderInt("FPS cap", &fpsLimitTarget, 20, 240);
         ImGui::SeparatorText("Grass culling / LOD");
         ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
         ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
