@@ -260,6 +260,7 @@ void HybridParticleApp::PopulateForwardPathCommands(const std::shared_ptr<GComma
         for (auto* grassEmitter : crossGrassEmitters)
         {
             grassEmitter->SetWorldConstantsBuffer(currentFrameResource->PrimePassConstantUploadBuffer.get());
+            grassEmitter->SetFrustumCullingData(mainPassCB.ViewProj, mainPassCB.EyePosW, 1800.0f);
         }
         cmdList->SetPipelineState(*defaultPrimePipelineResources.GetPSO(RenderMode::Transparent));
         PopulateDrawCommands(cmdList, (RenderMode::Transparent));

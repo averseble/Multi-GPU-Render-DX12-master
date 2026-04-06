@@ -58,7 +58,17 @@ struct GrassData
     uint3 Padding3;
 };
 
+struct GrassRenderVertex
+{
+    float3 Position;
+    float Padding0;
+    float2 TexCoord;
+    float2 Padding1;
+};
+
 StructuredBuffer<GrassData> GrassBuffer : register(t0);
+StructuredBuffer<GrassRenderVertex> ExpandedGrassVertices : register(t8);
+StructuredBuffer<uint> VisibleVertexCounter : register(t9);
 Texture2D GrassTexture : register(t1);
 SamplerState Sampler : register(s0);
 
@@ -212,5 +222,49 @@ float4 PS(PSInput input) : SV_Target
     float3 ambient = float3(0.2f, 0.2f, 0.2f);
     float3 lighting = ambient + diff;
     
+    return float4(color.rgb * lighting, color.a);
+}
+
+struct ExpandedVSOut
+{
+    float4 PositionH : SV_POSITION;
+    float2 TexCoord : TEXCOORD0;
+    float3 WorldPos : WORLD_POS;
+    float3 Normal : NORMAL;
+    float Alpha : ALPHA;
+};
+
+ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
+{
+    ExpandedVSOut o = (ExpandedVSOut)0;
+    uint visibleVertexCount = VisibleVertexCounter[0];
+    if (vertexID >= visibleVertexCount)
+    {
+        o.PositionH = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        o.TexCoord = float2(0.0f, 0.0f);
+        o.WorldPos = float3(0.0f, 0.0f, 0.0f);
+        o.Normal = float3(0.0f, 1.0f, 0.0f);
+        o.Alpha = 0.0f;
+        return o;
+    }
+    GrassRenderVertex v = ExpandedGrassVertices[vertexID];
+    float4 posW = mul(float4(v.Position, 1.0f), World);
+    o.PositionH = mul(posW, ViewProj);
+    o.TexCoord = v.TexCoord;
+    o.WorldPos = posW.xyz;
+    o.Normal = float3(0.0f, 1.0f, 0.0f);
+    o.Alpha = 1.0f;
+    return o;
+}
+
+float4 PS_Expanded(ExpandedVSOut input) : SV_Target
+{
+    clip(input.Alpha - 0.5f);
+    float4 color = GrassTexture.Sample(Sampler, input.TexCoord);
+    clip(color.a - 0.1f);
+    float3 lightDir = normalize(float3(0.5f, -0.5f, 0.5f));
+    float diff = max(0.3f, dot(input.Normal, -lightDir));
+    float3 ambient = float3(0.2f, 0.2f, 0.2f);
+    float3 lighting = ambient + diff;
     return float4(color.rgb * lighting, color.a);
 }

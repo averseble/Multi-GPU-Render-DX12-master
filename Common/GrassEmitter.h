@@ -23,6 +23,9 @@ public:
     std::shared_ptr<GBuffer> GetGrassBuffer() const { return grassBuffer; }
     void UpdateConstants(const GrassEmitterData& data) { emitterData = data; }
     void SetWorldConstantsBuffer(const GBuffer* worldConstants) { worldConstantsBuffer = worldConstants; }
+    const GBuffer* GetWorldConstantsBuffer() const { return worldConstantsBuffer; }
+    const GDescriptor* GetGrassDescriptors() const { return &grassDescriptors; }
+    const GBuffer* GetObjectPositionBuffer() const { return objectPositionBuffer.get(); }
 
 private:
     void Initialize();

@@ -10,19 +10,36 @@ struct GrassData
     float Rotation;
     float WindOffset;
     uint32_t TextureIndex;
-    uint32_t Padding[3]; // Для выравнивания до 16 байт
+    uint32_t Padding[3]; //    16 
 };
 
-// Константы эмиттера травы
+struct GrassRenderVertex
+{
+    Vector3 Position;
+    float Padding0 = 0.0f;
+    Vector2 TexCoord;
+    Vector2 Padding1 = Vector2::Zero;
+};
+
+//   
 struct GrassEmitterData
 {
-    // Только то, что реально используется
-    uint32_t GrassCount;           // Количество травинок
-    uint32_t GridSize;             // Размер сетки
-    float WorldSize;                // Размер мира
-    float QuadSize;                 // Размер квада
-    float Time;                     // Время для анимации
-    float WindStrength;             // Сила ветра
-    uint32_t AtlasTextureCount;      // Количество текстур
-    float Padding[3];                // Выравнивание до 16-байтной границы
+    //  ,   
+    uint32_t GrassCount;           //  
+    uint32_t GridSize;             //  
+    float WorldSize;                //  
+    float QuadSize;                 //  
+    float Time;                     //   
+    float WindStrength;             //  
+    uint32_t AtlasTextureCount;      //  
+    uint32_t GpuStressIterations = 0;
+    float Padding[2];                //   16- 
+};
+
+struct GrassCullData
+{
+    Matrix World = Matrix::Identity;
+    Matrix ViewProj = Matrix::Identity;
+    Vector3 EyePos = Vector3::Zero;
+    float MaxDistance = 1500.0f;
 };

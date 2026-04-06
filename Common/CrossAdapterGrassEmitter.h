@@ -25,6 +25,7 @@ public:
     void EnableShared();
     void DisableShared();
     void SetWorldConstantsBuffer(const GBuffer* worldConstants);
+    void SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, float maxDistance = 1500.0f);
 
 
 private:
@@ -40,13 +41,25 @@ private:
 
     std::shared_ptr<GBuffer> grassBuffer;
     std::shared_ptr<GCrossAdapterResource> crossAdapterGrassBuffer;
+    std::shared_ptr<GBuffer> expandedVertexBuffer;
+    std::shared_ptr<GCrossAdapterResource> crossAdapterExpandedVertexBuffer;
+    std::shared_ptr<GBuffer> primeExpandedVertexBuffer;
+    std::shared_ptr<GBuffer> visibleVertexCountBuffer;
+    std::shared_ptr<GCrossAdapterResource> crossAdapterVisibleVertexCountBuffer;
+    std::shared_ptr<GBuffer> primeVisibleVertexCountBuffer;
 
     GDescriptor computeDescriptors;
+    GDescriptor expandDescriptors;
 
     std::shared_ptr<ComputePSO> generatePSO;
+    std::shared_ptr<ComputePSO> expandPSO;
     std::shared_ptr<GRootSignature> computeRS;
+    std::shared_ptr<GRootSignature> expandRS;
+    std::shared_ptr<GRootSignature> drawRS;
+    std::shared_ptr<GraphicPSO> expandedDrawPSO;
 
     GrassEmitterData emitterData = {};
+    GrassCullData cullData = {};
     std::vector<GrassData> grassDataCPU;
 
     bool useSharedCompute = false;
