@@ -10,7 +10,7 @@ struct GrassData
     float Rotation;
     float WindOffset;
     uint32_t TextureIndex;
-    uint32_t Padding[3]; // ˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜ ˜˜ 16 ˜˜˜˜
+    uint32_t Padding[3]; // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ 16 ï¿½ï¿½ï¿½ï¿½
 };
 
 struct GrassRenderVertex
@@ -21,19 +21,19 @@ struct GrassRenderVertex
     Vector2 Padding1 = Vector2::Zero;
 };
 
-// ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜ ˜˜˜˜˜
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
 struct GrassEmitterData
 {
-    // ˜˜˜˜˜˜ ˜˜, ˜˜˜ ˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜
-    uint32_t GrassCount;           // ˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜
-    uint32_t GridSize;             // ˜˜˜˜˜˜ ˜˜˜˜˜
-    float WorldSize;                // ˜˜˜˜˜˜ ˜˜˜˜
-    float QuadSize;                 // ˜˜˜˜˜˜ ˜˜˜˜˜
-    float Time;                     // ˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜˜˜
-    float WindStrength;             // ˜˜˜˜ ˜˜˜˜˜
-    uint32_t AtlasTextureCount;      // ˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½, ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    uint32_t GrassCount;           // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    uint32_t GridSize;             // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    float WorldSize;                // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
+    float QuadSize;                 // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    float Time;                     // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    float WindStrength;             // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    uint32_t AtlasTextureCount;      // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     uint32_t GpuStressIterations = 0;
-    float Padding[2];                // ˜˜˜˜˜˜˜˜˜˜˜˜ ˜˜ 16-˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜
+    float Padding[2];                // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ 16-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 };
 
 struct GrassCullData
@@ -42,4 +42,8 @@ struct GrassCullData
     Matrix ViewProj = Matrix::Identity;
     Vector3 EyePos = Vector3::Zero;
     float MaxDistance = 1500.0f;
+    float Lod0Distance = 300.0f;
+    uint32_t Lod0BaseSegments = 4;
+    float WindTessellationScale = 4.0f;
+    float Padding0 = 0.0f;
 };

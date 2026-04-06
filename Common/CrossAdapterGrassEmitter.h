@@ -25,7 +25,9 @@ public:
     void EnableShared();
     void DisableShared();
     void SetWorldConstantsBuffer(const GBuffer* worldConstants);
-    void SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, float maxDistance = 1500.0f);
+    void SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, float maxDistance = 1500.0f,
+                               float lod0Distance = 300.0f, uint32_t lod0BaseSegments = 4,
+                               float windTessellationScale = 4.0f);
 
 
 private:
@@ -73,4 +75,7 @@ private:
     };
 
     Status dirtyActivated = None;
+
+    static constexpr uint32_t kMaxLod0Segments = 6;
+    static constexpr uint32_t kMaxVerticesPerBlade = kMaxLod0Segments * 6;
 };

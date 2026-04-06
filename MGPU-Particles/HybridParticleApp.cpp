@@ -260,7 +260,10 @@ void HybridParticleApp::PopulateForwardPathCommands(const std::shared_ptr<GComma
         for (auto* grassEmitter : crossGrassEmitters)
         {
             grassEmitter->SetWorldConstantsBuffer(currentFrameResource->PrimePassConstantUploadBuffer.get());
-            grassEmitter->SetFrustumCullingData(mainPassCB.ViewProj, mainPassCB.EyePosW, 1800.0f);
+            grassEmitter->SetFrustumCullingData(mainPassCB.ViewProj, mainPassCB.EyePosW,
+                                                grassCullMaxDistance, grassLod0Distance,
+                                                static_cast<uint32_t>(grassLod0BaseSegments),
+                                                grassWindTessellationScale);
         }
         cmdList->SetPipelineState(*defaultPrimePipelineResources.GetPSO(RenderMode::Transparent));
         PopulateDrawCommands(cmdList, (RenderMode::Transparent));
@@ -1581,6 +1584,15 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
     {
         ImGui::Text("Cross-adapter compute: %s", UseCrossAdapter ? "on (second GPU)" : "off (prime GPU)");
         ImGui::Text("Cross-adapter sync fences: %s", UseCrossSync ? "on" : "off");
+        ImGui::SeparatorText("Grass culling / LOD");
+        ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
+        ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
+        ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 6);
+        ImGui::SliderFloat("Wind tessellation scale", &grassWindTessellationScale, 0.0f, 8.0f, "%.2f");
+        if (grassLod0Distance > grassCullMaxDistance)
+        {
+            grassLod0Distance = grassCullMaxDistance;
+        }
         ImGui::Separator();
         ImGuiGpuSection("Prime adapter", "Scene render + window present",
                         primeDevice, primeAdapterDescValid, primeAdapterDesc,

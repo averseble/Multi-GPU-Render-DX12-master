@@ -63,7 +63,7 @@ struct GrassRenderVertex
     float3 Position;
     float Padding0;
     float2 TexCoord;
-    float2 Padding1;
+    float2 ExtraData; // x = useTexture(0/1), y = bladeHeight01
 };
 
 StructuredBuffer<GrassData> GrassBuffer : register(t0);
@@ -232,6 +232,8 @@ struct ExpandedVSOut
     float3 WorldPos : WORLD_POS;
     float3 Normal : NORMAL;
     float Alpha : ALPHA;
+    float UseTexture : TEXCOORD1;
+    float BladeHeight01 : TEXCOORD2;
 };
 
 ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
@@ -254,14 +256,27 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
     o.WorldPos = posW.xyz;
     o.Normal = float3(0.0f, 1.0f, 0.0f);
     o.Alpha = 1.0f;
+    o.UseTexture = v.ExtraData.x;
+    o.BladeHeight01 = v.ExtraData.y;
     return o;
 }
 
 float4 PS_Expanded(ExpandedVSOut input) : SV_Target
 {
     clip(input.Alpha - 0.5f);
-    float4 color = GrassTexture.Sample(Sampler, input.TexCoord);
-    clip(color.a - 0.1f);
+    float4 color;
+    if (input.UseTexture > 0.5f)
+    {
+        color = GrassTexture.Sample(Sampler, input.TexCoord);
+        clip(color.a - 0.1f);
+    }
+    else
+    {
+        float t = saturate(input.BladeHeight01);
+        float3 base = float3(0.10f, 0.38f, 0.10f);
+        float3 tip = float3(0.32f, 0.78f, 0.20f);
+        color = float4(lerp(base, tip, t), 1.0f);
+    }
     float3 lightDir = normalize(float3(0.5f, -0.5f, 0.5f));
     float diff = max(0.3f, dot(input.Normal, -lightDir));
     float3 ambient = float3(0.2f, 0.2f, 0.2f);

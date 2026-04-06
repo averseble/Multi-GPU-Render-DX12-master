@@ -2,6 +2,7 @@
 #include "CrossAdapterGrassEmitter.h"
 #include "GCommandList.h"
 #include "MathHelper.h"
+#include <algorithm>
 #include "GameObject.h"
 #include "Transform.h"
 
@@ -187,7 +188,7 @@ void CrossAdapterGrassEmitter::CreateBuffers()
     expandedVertexBuffer = std::make_shared<GBuffer>(
         secondDevice,
         sizeof(GrassRenderVertex),
-        emitterData.GrassCount * 6,
+        emitterData.GrassCount * kMaxVerticesPerBlade,
         L"Second Expanded Grass Vertex Buffer",
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     desc = expandedVertexBuffer->GetD3D12ResourceDesc();
@@ -196,7 +197,7 @@ void CrossAdapterGrassEmitter::CreateBuffers()
     primeExpandedVertexBuffer = std::make_shared<GBuffer>(
         primeDevice,
         sizeof(GrassRenderVertex),
-        emitterData.GrassCount * 6,
+        emitterData.GrassCount * kMaxVerticesPerBlade,
         L"Prime Expanded Grass Vertex Buffer",
         D3D12_RESOURCE_FLAG_NONE);
     visibleVertexCountBuffer = std::make_shared<GBuffer>(
@@ -247,7 +248,7 @@ void CrossAdapterGrassEmitter::DescriptorInitialize()
     expandedUavDesc.Format = DXGI_FORMAT_UNKNOWN;
     expandedUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     expandedUavDesc.Buffer.FirstElement = 0;
-    expandedUavDesc.Buffer.NumElements = emitterData.GrassCount * 6;
+    expandedUavDesc.Buffer.NumElements = emitterData.GrassCount * kMaxVerticesPerBlade;
     expandedUavDesc.Buffer.StructureByteStride = sizeof(GrassRenderVertex);
     expandedUavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
     expandedVertexBuffer->CreateUnorderedAccessView(&expandedUavDesc, &expandDescriptors, 1);
@@ -351,7 +352,7 @@ void CrossAdapterGrassEmitter::Draw(const std::shared_ptr<GCommandList>& cmdList
             cmdList->SetRootShaderResourceView(3, *primeVisibleVertexCountBuffer);
             cmdList->SetRootDescriptorTable(4, descriptors, 1);
             cmdList->SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            cmdList->Draw(emitterData.GrassCount * 6, 1, 0, 0);
+            cmdList->Draw(emitterData.GrassCount * kMaxVerticesPerBlade, 1, 0, 0);
         }
     }
     else
@@ -474,9 +475,14 @@ void CrossAdapterGrassEmitter::SetWorldConstantsBuffer(const GBuffer* worldConst
     }
 }
 
-void CrossAdapterGrassEmitter::SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, const float maxDistance)
+void CrossAdapterGrassEmitter::SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, const float maxDistance,
+                                                     const float lod0Distance, const uint32_t lod0BaseSegments,
+                                                     const float windTessellationScale)
 {
     cullData.ViewProj = viewProj;
     cullData.EyePos = eyePos;
     cullData.MaxDistance = maxDistance;
+    cullData.Lod0Distance = lod0Distance;
+    cullData.Lod0BaseSegments = std::min(lod0BaseSegments, kMaxLod0Segments);
+    cullData.WindTessellationScale = windTessellationScale;
 }

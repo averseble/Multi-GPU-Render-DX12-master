@@ -30,6 +30,10 @@ cbuffer GrassCullData : register(b1)
     float4x4 ViewProj;
     float3 EyePos;
     float MaxDistance;
+    float Lod0Distance;
+    uint Lod0BaseSegments;
+    float WindTessellationScale;
+    float Padding0;
 }
 
 RWStructuredBuffer<GrassData> GrassBuffer : register(u0);
@@ -158,16 +162,48 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
+    float distToEye = length(toEye);
+    bool useLod0 = distToEye <= Lod0Distance;
+    uint segments = 1u;
+    if (useLod0)
+    {
+        float windAbs = abs(wind);
+        uint extraSeg = (uint)clamp(floor(windAbs * WindTessellationScale), 0.0f, 2.0f);
+        segments = clamp(Lod0BaseSegments + extraSeg, 2u, 6u);
+    }
+
+    uint vertexCount = segments * 6u;
     uint baseVertex;
-    InterlockedAdd(VisibleVertexCounter[0], 6u, baseVertex);
+    InterlockedAdd(VisibleVertexCounter[0], vertexCount, baseVertex);
     GrassRenderVertex v;
     v.Padding0 = 0.0f;
-    v.Padding1 = float2(0.0f, 0.0f);
 
-    v.Position = p[0]; v.TexCoord = float2(0.0f, 1.0f); ExpandedGrassBuffer[baseVertex + 0] = v;
-    v.Position = p[1]; v.TexCoord = float2(0.0f, 0.0f); ExpandedGrassBuffer[baseVertex + 1] = v;
-    v.Position = p[2]; v.TexCoord = float2(1.0f, 1.0f); ExpandedGrassBuffer[baseVertex + 2] = v;
-    v.Position = p[2]; v.TexCoord = float2(1.0f, 1.0f); ExpandedGrassBuffer[baseVertex + 3] = v;
-    v.Position = p[1]; v.TexCoord = float2(0.0f, 0.0f); ExpandedGrassBuffer[baseVertex + 4] = v;
-    v.Position = p[3]; v.TexCoord = float2(1.0f, 0.0f); ExpandedGrassBuffer[baseVertex + 5] = v;
+    [loop]
+    for (uint seg = 0u; seg < segments; ++seg)
+    {
+        float t0 = float(seg) / float(segments);
+        float t1 = float(seg + 1u) / float(segments);
+
+        float3 bL = float3(p[0].x, lerp(p[0].y, p[1].y, t0), p[0].z);
+        float3 tL = float3(p[0].x, lerp(p[0].y, p[1].y, t1), p[0].z);
+        float3 bR = float3(p[2].x, lerp(p[2].y, p[3].y, t0), p[2].z);
+        float3 tR = float3(p[2].x, lerp(p[2].y, p[3].y, t1), p[2].z);
+
+        uint dst = baseVertex + seg * 6u;
+        float useTexture = useLod0 ? 0.0f : 1.0f;
+
+        v.Padding1 = float2(useTexture, t0);
+        v.Position = bL; v.TexCoord = float2(0.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 0u] = v;
+        v.Padding1 = float2(useTexture, t1);
+        v.Position = tL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 1u] = v;
+        v.Padding1 = float2(useTexture, t0);
+        v.Position = bR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 2u] = v;
+
+        v.Padding1 = float2(useTexture, t0);
+        v.Position = bR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 3u] = v;
+        v.Padding1 = float2(useTexture, t1);
+        v.Position = tL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 4u] = v;
+        v.Padding1 = float2(useTexture, t1);
+        v.Position = tR; v.TexCoord = float2(1.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 5u] = v;
+    }
 }
