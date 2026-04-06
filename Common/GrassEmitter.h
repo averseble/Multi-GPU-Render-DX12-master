@@ -22,6 +22,7 @@ public:
 
     std::shared_ptr<GBuffer> GetGrassBuffer() const { return grassBuffer; }
     void UpdateConstants(const GrassEmitterData& data) { emitterData = data; }
+    void SetWorldConstantsBuffer(const GBuffer* worldConstants) { worldConstantsBuffer = worldConstants; }
 
 private:
     void Initialize();
@@ -38,6 +39,7 @@ private:
     std::shared_ptr<ConstantUploadBuffer<ObjectConstants>> objectPositionBuffer;
     std::shared_ptr<GBuffer> grassBuffer;                 // RWStructuredBuffer<GrassData>
     std::shared_ptr<GBuffer> constantBuffer;              // ConstantBuffer<GrassEmitterData>
+    const GBuffer* worldConstantsBuffer = nullptr;        // b1 WorldConstants for grass draw
 
     // Дескрипторы
     GDescriptor grassDescriptors;                          // Для рендера (SRV)

@@ -257,6 +257,10 @@ void HybridParticleApp::PopulateForwardPathCommands(const std::shared_ptr<GComma
         cmdList->SetPipelineState(*defaultPrimePipelineResources.GetPSO(RenderMode::OpaqueAlphaDrop));
         PopulateDrawCommands(cmdList, (RenderMode::OpaqueAlphaDrop));
 
+        for (auto* grassEmitter : crossGrassEmitters)
+        {
+            grassEmitter->SetWorldConstantsBuffer(currentFrameResource->PrimePassConstantUploadBuffer.get());
+        }
         cmdList->SetPipelineState(*defaultPrimePipelineResources.GetPSO(RenderMode::Transparent));
         PopulateDrawCommands(cmdList, (RenderMode::Transparent));
 

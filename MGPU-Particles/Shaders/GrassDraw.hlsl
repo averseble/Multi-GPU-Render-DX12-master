@@ -1,6 +1,11 @@
 // GrassDraw.hlsl
 // Шейдер для отрисовки травы с одной текстурой
 
+// Debug switch:
+// 1 -> force all grass to a fixed world-space quad (diagnostic mode)
+// 0 -> normal grass rendering path
+#define GRASS_DEBUG_FIXED_WORLD 0
+
 cbuffer ObjectConstants : register(b0)
 {
     float4x4 World;
@@ -10,10 +15,24 @@ cbuffer ObjectConstants : register(b0)
 cbuffer WorldConstants : register(b1)
 {
     float4x4 View;
+    float4x4 InvView;
     float4x4 Proj;
+    float4x4 InvProj;
     float4x4 ViewProj;
-    float3 EyePos;
-    float Padding;
+    float4x4 InvViewProj;
+    float4x4 ViewProjTex;
+    float4x4 ShadowTransform;
+    float3 EyePosW;
+    float debugMap;
+    float2 RenderTargetSize;
+    float2 InvRenderTargetSize;
+    float NearZ;
+    float FarZ;
+    float TotalTime;
+    float DeltaTime;
+    float4 AmbientLight;
+    float3 CameraForwardVector;
+    float padding;
 }
 
 cbuffer GrassEmitterData : register(b2)
@@ -25,7 +44,8 @@ cbuffer GrassEmitterData : register(b2)
     float Time;
     float WindStrength;
     uint AtlasTextureCount;
-    float3 Padding2;
+    uint GpuStressIterations;
+    float2 Padding2;
 }
 
 struct GrassData
@@ -51,7 +71,7 @@ struct VSInput
 
 struct VSOutput
 {
-    float3 WorldPos : POSITION; // Позиция травинки в мировом пространстве
+    float3 WorldPos : POSITION; // blade center in world space
     float Scale : SCALE;
     float Rotation : ROTATION;
     float WindOffset : WINDOFFSET;
@@ -64,12 +84,12 @@ VSOutput VS(VSInput input)
    // Читаем данные травинки по InstanceID (рендерим все травинки сразу)
     GrassData grass = GrassBuffer[input.InstanceID];
     
-    // Применяем мировую и видовую трансформации
+    // Применяем мировую трансформацию
     float4 worldPos = mul(float4(grass.Position, 1.0f), World);
-    float4 viewPos = mul(worldPos, View);
     
     VSOutput output = (VSOutput) 0;
-    output.WorldPos = viewPos;
+    // Keep wind phase and placement in world space so camera motion does not move blades.
+    output.WorldPos = worldPos.xyz;
     output.Scale = grass.Scale;
     output.Rotation = grass.Rotation;
     output.WindOffset = grass.WindOffset;
@@ -105,30 +125,38 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     
     float width = QuadSize * input.Scale * 0.5f;
     float height = QuadSize * input.Scale;
+
+#if GRASS_DEBUG_FIXED_WORLD
+    const float3 debugCenterW = float3(0.0f, 0.0f, 0.0f);
+    float3 up = float3(0.0f, 1.0f, 0.0f);
+    float3 right = float3(1.0f, 0.0f, 0.0f);
+    float sideOffset = offset.x * width;
+    float verticalOffset = offset.y * height;
+    float3 worldPos = debugCenterW + right * sideOffset + up * verticalOffset;
+#else
     
+    // Build a camera-facing basis in world space, anchored at blade center.
+    float3 toEye = EyePosW - input.WorldPos;
+    toEye.y = 0.0f;
+    float toEyeLen2 = dot(toEye, toEye);
+    float3 forward = (toEyeLen2 > 1e-6f) ? normalize(toEye) : float3(0.0f, 0.0f, 1.0f);
+    float3 up = float3(0.0f, 1.0f, 0.0f);
+    float3 right = normalize(cross(up, forward));
+
+    // Per-blade yaw variation around world up.
     float cosR = cos(input.Rotation);
     float sinR = sin(input.Rotation);
-    
-    // Смещение относительно центра травинки
-    float3 localOffset;
-    localOffset.x = offset.x * width;
-    localOffset.y = offset.y * height;
-    localOffset.z = 0.0f;
-    
-    // Поворачиваем смещение
-    float3 rotatedOffset;
-    rotatedOffset.x = localOffset.x * cosR - localOffset.z * sinR;
-    rotatedOffset.z = localOffset.x * sinR + localOffset.z * cosR;
-    rotatedOffset.y = localOffset.y;
-    
-    // Ветер влияет на верхние вершины
-    if (offset.y > 0)
+    float3 rotatedRight = right * cosR + forward * sinR;
+
+    float sideOffset = offset.x * width;
+    float verticalOffset = offset.y * height;
+    if (offset.y > 0.0f)
     {
-        rotatedOffset.x += windFactor * width * 2.0f;
+        sideOffset += windFactor * width * 2.0f;
     }
-    
-    // Мировая позиция вершины
-    float3 worldPos = input.WorldPos + rotatedOffset;
+
+    float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset;
+#endif
     
     output.WorldPos = worldPos;
     output.PositionH = mul(float4(worldPos, 1.0f), ViewProj);

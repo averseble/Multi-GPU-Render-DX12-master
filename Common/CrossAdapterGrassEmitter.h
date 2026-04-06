@@ -24,6 +24,7 @@ public:
 
     void EnableShared();
     void DisableShared();
+    void SetWorldConstantsBuffer(const GBuffer* worldConstants);
 
 
 private:

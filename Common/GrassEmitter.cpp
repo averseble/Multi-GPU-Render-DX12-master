@@ -367,7 +367,11 @@ void GrassEmitter::Draw(const std::shared_ptr<GCommandList>& cmdList)
     // b0 - ObjectConstants (мировая матрица)
     cmdList->SetRootConstantBufferView(0, *objectPositionBuffer.get());
 
-    // b1 - WorldConstants НЕ УСТАНАВЛИВАЕМ - он уже установлен в основном проходе
+    // b1 - WorldConstants must be explicitly rebound for this root signature.
+    if (worldConstantsBuffer)
+    {
+        cmdList->SetRootConstantBufferView(1, *worldConstantsBuffer);
+    }
 
     // b2 - GrassEmitterData
     cmdList->SetRootConstantBufferView(2, *constantBuffer);

@@ -247,3 +247,11 @@ void CrossAdapterGrassEmitter::DisableShared()
     useSharedCompute = false;
     dirtyActivated = Disable;
 }
+
+void CrossAdapterGrassEmitter::SetWorldConstantsBuffer(const GBuffer* worldConstants)
+{
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWorldConstantsBuffer(worldConstants);
+    }
+}
