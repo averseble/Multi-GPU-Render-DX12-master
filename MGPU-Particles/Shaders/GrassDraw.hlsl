@@ -45,6 +45,8 @@ cbuffer GrassEmitterData : register(b2)
     float WindStrength;
     uint AtlasTextureCount;
     uint GpuStressIterations;
+    uint Lod0BladeCount;
+    uint Lod1BladeCount;
     float2 Padding2;
 }
 
@@ -168,10 +170,8 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
 
     float sideOffset = offset.x * width;
     float verticalOffset = offset.y * height;
-    if (offset.y > 0.0f)
-    {
-        sideOffset += windFactor * width * 2.0f;
-    }
+    float bendFactor = saturate((offset.y + 1.0f) * 0.5f);
+    sideOffset += windFactor * width * 1.6f * bendFactor;
 
     float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset;
 #endif
@@ -187,7 +187,7 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     return output;
 }
 
-[maxvertexcount(24)]
+[maxvertexcount(64)]
 void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
 {
     GSInput grass = input[0];
@@ -199,22 +199,67 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     // Single-GPU path: approximate LOD0 by segmenting close blades.
     float distToEye = distance(EyePosW, grass.WorldPos);
     bool useLod0 = distToEye <= 300.0f;
-    uint segments = useLod0 ? 4u : 1u;
-    float useTexture = useLod0 ? 0.0f : 1.0f;
-
-    [loop]
-    for (uint seg = 0u; seg < segments; ++seg)
+    if (useLod0)
     {
-        float t0 = float(seg) / float(segments);
-        float t1 = float(seg + 1u) / float(segments);
-        float y0 = lerp(-1.0f, 1.0f, t0);
-        float y1 = lerp(-1.0f, 1.0f, t1);
+        // Near-field: render several thin separated strips per instance
+        // so the silhouette reads as individual blades rather than one card.
+        const uint bladeCount = clamp(Lod0BladeCount, 1u, 4u);
+        const uint segments = 4u;
+        const float useTexture = 0.0f;
+        const float bladeHalfWidth = 0.04f;
+        const float bladeSpread = 0.75f;
 
-        triStream.Append(CreateQuadVertex(grass, float2(-1.0f, y0), float2(0.0f, 1.0f - t0), windFactor, useTexture, t0));
-        triStream.Append(CreateQuadVertex(grass, float2(-1.0f, y1), float2(0.0f, 1.0f - t1), windFactor, useTexture, t1));
-        triStream.Append(CreateQuadVertex(grass, float2(1.0f, y0), float2(1.0f, 1.0f - t0), windFactor, useTexture, t0));
-        triStream.Append(CreateQuadVertex(grass, float2(1.0f, y1), float2(1.0f, 1.0f - t1), windFactor, useTexture, t1));
-        triStream.RestartStrip();
+        [loop]
+        for (uint blade = 0u; blade < bladeCount; ++blade)
+        {
+            float bladeN = (bladeCount > 1u) ? (float(blade) / float(bladeCount - 1u)) : 0.5f;
+            float bladeCenter = lerp(-bladeSpread, bladeSpread, bladeN);
+            float bladePhaseOffset = (bladeN - 0.5f) * 0.6f;
+
+            [loop]
+            for (uint seg = 0u; seg < segments; ++seg)
+            {
+                float t0 = float(seg) / float(segments);
+                float t1 = float(seg + 1u) / float(segments);
+                float y0 = lerp(-1.0f, 1.0f, t0);
+                float y1 = lerp(-1.0f, 1.0f, t1);
+
+                float taper0 = lerp(1.0f, 0.12f, t0);
+                float taper1 = lerp(1.0f, 0.12f, t1);
+                float xL0 = bladeCenter - bladeHalfWidth * taper0;
+                float xR0 = bladeCenter + bladeHalfWidth * taper0;
+                float xL1 = bladeCenter - bladeHalfWidth * taper1;
+                float xR1 = bladeCenter + bladeHalfWidth * taper1;
+                float windBlade = windFactor + bladePhaseOffset;
+
+                triStream.Append(CreateQuadVertex(grass, float2(xL0, y0), float2(0.0f, 1.0f - t0), windBlade, useTexture, t0));
+                triStream.Append(CreateQuadVertex(grass, float2(xL1, y1), float2(0.0f, 1.0f - t1), windBlade, useTexture, t1));
+                triStream.Append(CreateQuadVertex(grass, float2(xR0, y0), float2(1.0f, 1.0f - t0), windBlade, useTexture, t0));
+                triStream.Append(CreateQuadVertex(grass, float2(xR1, y1), float2(1.0f, 1.0f - t1), windBlade, useTexture, t1));
+                triStream.RestartStrip();
+            }
+        }
+    }
+    else
+    {
+        const uint bladeCount = clamp(Lod1BladeCount, 1u, 4u);
+        const float useTexture = 1.0f;
+        const float bladeHalfWidth = 0.16f;
+        const float bladeSpread = 0.9f;
+        [loop]
+        for (uint blade = 0u; blade < bladeCount; ++blade)
+        {
+            float bladeN = (bladeCount > 1u) ? (float(blade) / float(bladeCount - 1u)) : 0.5f;
+            float bladeCenter = lerp(-bladeSpread, bladeSpread, bladeN);
+            float xL = bladeCenter - bladeHalfWidth;
+            float xR = bladeCenter + bladeHalfWidth;
+
+            triStream.Append(CreateQuadVertex(grass, float2(xL, -1.0f), float2(0.0f, 1.0f), windFactor, useTexture, 0.0f));
+            triStream.Append(CreateQuadVertex(grass, float2(xL, 1.0f), float2(0.0f, 0.0f), windFactor, useTexture, 1.0f));
+            triStream.Append(CreateQuadVertex(grass, float2(xR, -1.0f), float2(1.0f, 1.0f), windFactor, useTexture, 0.0f));
+            triStream.Append(CreateQuadVertex(grass, float2(xR, 1.0f), float2(1.0f, 0.0f), windFactor, useTexture, 1.0f));
+            triStream.RestartStrip();
+        }
     }
 }
 

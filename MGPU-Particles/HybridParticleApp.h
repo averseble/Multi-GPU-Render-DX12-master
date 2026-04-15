@@ -166,7 +166,11 @@ protected:
     float grassCullMaxDistance = 1800.0f;
     float grassLod0Distance = 350.0f;
     int grassLod0BaseSegments = 4;
+    int grassLod0BladeCount = 3;
+    int grassLod1BladeCount = 1;
     float grassWindTessellationScale = 4.0f;
+    int grassBladeCount = 5000;
+    int pendingGrassBladeCount = -1;
     bool fpsLimitEnabled = true;
     int fpsLimitTarget = 60;
 

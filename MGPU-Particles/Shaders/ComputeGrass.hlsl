@@ -21,6 +21,8 @@ cbuffer GrassEmitterData : register(b0)
     float WindStrength;
     uint AtlasTextureCount;
     uint GpuStressIterations;
+    uint Lod0BladeCount;
+    uint Lod1BladeCount;
     float2 Padding;
 }
 
@@ -172,38 +174,80 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
         segments = clamp(Lod0BaseSegments + extraSeg, 2u, 6u);
     }
 
-    uint vertexCount = segments * 6u;
+    uint bladeCount = useLod0 ? clamp(Lod0BladeCount, 1u, 4u) : clamp(Lod1BladeCount, 1u, 4u);
+    uint vertexCount = bladeCount * segments * 6u;
     uint baseVertex;
     InterlockedAdd(VisibleVertexCounter[0], vertexCount, baseVertex);
     GrassRenderVertex v;
     v.Padding0 = 0.0f;
 
     [loop]
-    for (uint seg = 0u; seg < segments; ++seg)
+    for (uint blade = 0u; blade < bladeCount; ++blade)
     {
-        float t0 = float(seg) / float(segments);
-        float t1 = float(seg + 1u) / float(segments);
+        float bladeN = (bladeCount > 1u) ? (float(blade) / float(bladeCount - 1u)) : 0.5f;
+        float bladeCenter = lerp(-0.75f, 0.75f, bladeN) * width;
+        float bladeWidth = width * (useLod0 ? 0.30f : 0.35f);
+        float bladePhaseOffset = (bladeN - 0.5f) * 0.6f;
 
-        float3 bL = float3(p[0].x, lerp(p[0].y, p[1].y, t0), p[0].z);
-        float3 tL = float3(p[0].x, lerp(p[0].y, p[1].y, t1), p[0].z);
-        float3 bR = float3(p[2].x, lerp(p[2].y, p[3].y, t0), p[2].z);
-        float3 tR = float3(p[2].x, lerp(p[2].y, p[3].y, t1), p[2].z);
+        [loop]
+        for (uint seg = 0u; seg < segments; ++seg)
+        {
+            float t0 = float(seg) / float(segments);
+            float t1 = float(seg + 1u) / float(segments);
 
-        uint dst = baseVertex + seg * 6u;
-        float useTexture = useLod0 ? 0.0f : 1.0f;
+            float windSeg = (wind + bladePhaseOffset);
+            float bend0 = t0;
+            float bend1 = t1;
 
-        v.Padding1 = float2(useTexture, t0);
-        v.Position = bL; v.TexCoord = float2(0.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 0u] = v;
-        v.Padding1 = float2(useTexture, t1);
-        v.Position = tL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 1u] = v;
-        v.Padding1 = float2(useTexture, t0);
-        v.Position = bR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 2u] = v;
+            float taper0 = useLod0 ? lerp(1.0f, 0.12f, t0) : 1.0f;
+            float taper1 = useLod0 ? lerp(1.0f, 0.12f, t1) : 1.0f;
+            float w0 = bladeWidth * taper0;
+            float w1 = bladeWidth * taper1;
 
-        v.Padding1 = float2(useTexture, t0);
-        v.Position = bR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 3u] = v;
-        v.Padding1 = float2(useTexture, t1);
-        v.Position = tL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 4u] = v;
-        v.Padding1 = float2(useTexture, t1);
-        v.Position = tR; v.TexCoord = float2(1.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 5u] = v;
+            float x0 = bladeCenter + windSeg * width * 1.6f * bend0;
+            float x1 = bladeCenter + windSeg * width * 1.6f * bend1;
+
+            float y0 = lerp(-height, height, t0);
+            float y1 = lerp(-height, height, t1);
+
+            float3 bL = float3(x0 - w0, y0, 0.0f);
+            float3 bR = float3(x0 + w0, y0, 0.0f);
+            float3 tL = float3(x1 - w1, y1, 0.0f);
+            float3 tR = float3(x1 + w1, y1, 0.0f);
+
+            float3 rbL;
+            rbL.x = bL.x * cosR - bL.z * sinR + grass.Position.x;
+            rbL.z = bL.x * sinR + bL.z * cosR + grass.Position.z;
+            rbL.y = bL.y + grass.Position.y;
+            float3 rbR;
+            rbR.x = bR.x * cosR - bR.z * sinR + grass.Position.x;
+            rbR.z = bR.x * sinR + bR.z * cosR + grass.Position.z;
+            rbR.y = bR.y + grass.Position.y;
+            float3 rtL;
+            rtL.x = tL.x * cosR - tL.z * sinR + grass.Position.x;
+            rtL.z = tL.x * sinR + tL.z * cosR + grass.Position.z;
+            rtL.y = tL.y + grass.Position.y;
+            float3 rtR;
+            rtR.x = tR.x * cosR - tR.z * sinR + grass.Position.x;
+            rtR.z = tR.x * sinR + tR.z * cosR + grass.Position.z;
+            rtR.y = tR.y + grass.Position.y;
+
+            uint dst = baseVertex + blade * (segments * 6u) + seg * 6u;
+            float useTexture = useLod0 ? 0.0f : 1.0f;
+
+            v.Padding1 = float2(useTexture, t0);
+            v.Position = rbL; v.TexCoord = float2(0.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 0u] = v;
+            v.Padding1 = float2(useTexture, t1);
+            v.Position = rtL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 1u] = v;
+            v.Padding1 = float2(useTexture, t0);
+            v.Position = rbR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 2u] = v;
+
+            v.Padding1 = float2(useTexture, t0);
+            v.Position = rbR; v.TexCoord = float2(1.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 3u] = v;
+            v.Padding1 = float2(useTexture, t1);
+            v.Position = rtL; v.TexCoord = float2(0.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 4u] = v;
+            v.Padding1 = float2(useTexture, t1);
+            v.Position = rtR; v.TexCoord = float2(1.0f, 1.0f - t1); ExpandedGrassBuffer[dst + 5u] = v;
+        }
     }
 }

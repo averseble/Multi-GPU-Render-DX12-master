@@ -8,7 +8,8 @@
 
 CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> primeDev,
     const std::shared_ptr<GDevice>& secondDev,
-    uint32_t grassCount, float worldSize)
+    uint32_t grassCount, float worldSize,
+    uint32_t lod0BladeCount, uint32_t lod1BladeCount)
     : primeDevice(primeDev), secondDevice(secondDev)
 {
     emitterData.GrassCount = grassCount;
@@ -17,10 +18,13 @@ CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> prim
     emitterData.WindStrength = 0.5f;
     emitterData.Time = 0.0f;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
+    emitterData.Lod0BladeCount = std::max(1u, std::min(lod0BladeCount, kMaxBladeCount));
+    emitterData.Lod1BladeCount = std::max(1u, std::min(lod1BladeCount, kMaxBladeCount));
     emitterData.AtlasTextureCount = 1;
 
     // ������� �������� ������� � 3 �����������
-    primeGrassEmitter = std::make_shared<GrassEmitter>(primeDevice, grassCount, worldSize);
+    primeGrassEmitter = std::make_shared<GrassEmitter>(
+        primeDevice, grassCount, worldSize, emitterData.Lod0BladeCount, emitterData.Lod1BladeCount);
 
     InitPSO(secondDevice);
     CreateBuffers();
@@ -444,9 +448,32 @@ void CrossAdapterGrassEmitter::SetWorldSize(float size)
 
 void CrossAdapterGrassEmitter::SetGrassCount(uint32_t count)
 {
+    if (count == 0)
+    {
+        count = 1;
+    }
+    if (emitterData.GrassCount == count)
+    {
+        return;
+    }
+
     emitterData.GrassCount = count;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(count)));
+    primeGrassEmitter->SetGrassCount(count);
+    CreateBuffers();
+    DescriptorInitialize();
+    GenerateGrassDataCPU();
     needRegenerate = true;
+}
+
+void CrossAdapterGrassEmitter::SetLodBladeCounts(uint32_t lod0BladeCount, uint32_t lod1BladeCount)
+{
+    emitterData.Lod0BladeCount = std::max(1u, std::min(lod0BladeCount, kMaxBladeCount));
+    emitterData.Lod1BladeCount = std::max(1u, std::min(lod1BladeCount, kMaxBladeCount));
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetLodBladeCounts(emitterData.Lod0BladeCount, emitterData.Lod1BladeCount);
+    }
 }
 
 void CrossAdapterGrassEmitter::Regenerate()

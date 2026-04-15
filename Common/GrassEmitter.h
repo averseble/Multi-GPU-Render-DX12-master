@@ -6,18 +6,20 @@
 class GrassEmitter : public Renderer
 {
 public:
-    GrassEmitter(std::shared_ptr<GDevice> device, uint32_t grassCount = 10000, float worldSize = 100.0f);
+    GrassEmitter(std::shared_ptr<GDevice> device, uint32_t grassCount = 10000, float worldSize = 100.0f,
+                 uint32_t lod0BladeCount = 3, uint32_t lod1BladeCount = 1);
     virtual ~GrassEmitter();
 
     // Renderer interface
     void Update() override;
     void Draw(const std::shared_ptr<GCommandList>& cmdList) override;
-    void Dispatch(const std::shared_ptr<GCommandList>& cmdList); // Δλÿ γενεπΰφθθ νΰ GPU
+    void Dispatch(const std::shared_ptr<GCommandList>& cmdList); //    GPU
 
-    // Σοπΰβλενθε
+    // 
     void SetWindStrength(float strength) { emitterData.WindStrength = strength; }
     void SetWorldSize(float size) { emitterData.WorldSize = size; needRegenerate = true; }
-    void SetGrassCount(uint32_t count) { emitterData.GrassCount = count; needRegenerate = true; }
+    void SetGrassCount(uint32_t count);
+    void SetLodBladeCounts(uint32_t lod0BladeCount, uint32_t lod1BladeCount);
     void Regenerate();
 
     std::shared_ptr<GBuffer> GetGrassBuffer() const { return grassBuffer; }
@@ -38,32 +40,32 @@ private:
 
     std::shared_ptr<GDevice> device;
 
-    // Αστεπϋ
+    // 
     std::shared_ptr<ConstantUploadBuffer<ObjectConstants>> objectPositionBuffer;
     std::shared_ptr<GBuffer> grassBuffer;                 // RWStructuredBuffer<GrassData>
     std::shared_ptr<GBuffer> constantBuffer;              // ConstantBuffer<GrassEmitterData>
     const GBuffer* worldConstantsBuffer = nullptr;        // b1 WorldConstants for grass draw
 
-    // Δερκπθοςξπϋ
-    GDescriptor grassDescriptors;                          // Δλÿ πενδεπΰ (SRV)
-    GDescriptor computeDescriptors;                        // Δλÿ compute (UAV) - ξοφθξνΰλόνξ
+    // 
+    GDescriptor grassDescriptors;                          //   (SRV)
+    GDescriptor computeDescriptors;                        //  compute (UAV) - 
 
-    // Δΰννϋε
-    std::vector<GrassData> grassDataCPU;                   // CPU κξοθÿ
+    // 
+    std::vector<GrassData> grassDataCPU;                   // CPU 
     GrassEmitterData emitterData = {};
     ObjectConstants objectWorldData{};
 
-    // Òεκρςσπϋ
-    std::vector<std::shared_ptr<GTexture>> Atlas;         // Òεκρςσπϋ ςπΰβϋ
+    // 
+    std::vector<std::shared_ptr<GTexture>> Atlas;         //  
 
-    // Ψειδεπϋ θ PSO
+    //   PSO
     std::shared_ptr<GRootSignature> renderSignature;
-    std::shared_ptr<GRootSignature> computeSignature;     // Δλÿ γενεπΰφθθ νΰ GPU
+    std::shared_ptr<GRootSignature> computeSignature;     //    GPU
     std::shared_ptr<GraphicPSO> renderPSO;
-    std::shared_ptr<ComputePSO> generatePSO;              // Δλÿ γενεπΰφθθ νΰ GPU
-    std::shared_ptr<GShader> generateShader;              // Compute ψειδεπ δλÿ γενεπΰφθθ
+    std::shared_ptr<ComputePSO> generatePSO;              //    GPU
+    std::shared_ptr<GShader> generateShader;              // Compute   
 
-    // Ρξρςξÿνθε
+    // 
     bool needRegenerate = true;
-    bool useGPUGeneration = false;                          // true ερλθ θροξλόησεμ compute shader
+    bool useGPUGeneration = false;                          // true   compute shader
 };

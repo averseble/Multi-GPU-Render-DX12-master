@@ -10,7 +10,9 @@ public:
     CrossAdapterGrassEmitter(std::shared_ptr<GDevice> primeDevice,
         const std::shared_ptr<GDevice>& secondDevice,
         uint32_t grassCount = 10000,
-        float worldSize = 100.0f);
+        float worldSize = 100.0f,
+        uint32_t lod0BladeCount = 3,
+        uint32_t lod1BladeCount = 1);
     virtual ~CrossAdapterGrassEmitter();
 
     void Update() override;
@@ -20,6 +22,7 @@ public:
     void SetWindStrength(float strength);
     void SetWorldSize(float size);
     void SetGrassCount(uint32_t count);
+    void SetLodBladeCounts(uint32_t lod0BladeCount, uint32_t lod1BladeCount);
     void Regenerate();
 
     void EnableShared();
@@ -77,5 +80,6 @@ private:
     Status dirtyActivated = None;
 
     static constexpr uint32_t kMaxLod0Segments = 6;
-    static constexpr uint32_t kMaxVerticesPerBlade = kMaxLod0Segments * 6;
+    static constexpr uint32_t kMaxBladeCount = 4;
+    static constexpr uint32_t kMaxVerticesPerBlade = kMaxBladeCount * kMaxLod0Segments * 6;
 };

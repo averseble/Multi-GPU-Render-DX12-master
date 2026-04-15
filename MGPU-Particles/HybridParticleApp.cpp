@@ -1,5 +1,6 @@
 #include "HybridParticleApp.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -100,6 +101,21 @@ HybridParticleApp::~HybridParticleApp()
 
 void HybridParticleApp::Update(const GameTimer& gt)
 {
+    if (pendingGrassBladeCount > 0)
+    {
+        Flush();
+        for (auto* emitter : crossGrassEmitters)
+        {
+            emitter->SetGrassCount(static_cast<uint32_t>(pendingGrassBladeCount));
+        }
+        pendingGrassBladeCount = -1;
+    }
+    for (auto* emitter : crossGrassEmitters)
+    {
+        emitter->SetLodBladeCounts(static_cast<uint32_t>(std::max(1, grassLod0BladeCount)),
+                                   static_cast<uint32_t>(std::max(1, grassLod1BladeCount)));
+    }
+
     const UINT olderIndex = currentFrameResourceIndex - 1 > globalCountFrameResources
                                 ? 0
                                 : static_cast<UINT>(currentFrameResourceIndex);
@@ -993,9 +1009,12 @@ void HybridParticleApp::CreateGO()
     //gameObjects.push_back(std::move(grassField));
 
     auto grassField = std::make_unique<GameObject>("Grass Field");
-    grassField->GetTransform()->SetPosition(Vector3::Up);
+    grassField->GetTransform()->SetPosition(Vector3(0,60,0));
     grassField->SetScale(5.5f);
-    auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice, 50000, 200.0f);
+    auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice,
+                                                                   static_cast<uint32_t>(grassBladeCount), 200.0f,
+                                                                   static_cast<uint32_t>(grassLod0BladeCount),
+                                                                   static_cast<uint32_t>(grassLod1BladeCount));
     grassField->AddComponent(grassEmitter);
     typedRenderer[static_cast<int>(RenderMode::Transparent)].push_back(grassEmitter);
     crossGrassEmitters.push_back(grassEmitter.get()); // ���� ����� ������ ��� ����������
@@ -1627,7 +1646,19 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         ImGui::SeparatorText("Frame limiter");
         ImGui::Checkbox("Enable FPS limit", &fpsLimitEnabled);
         ImGui::SliderInt("FPS cap", &fpsLimitTarget, 20, 240);
+        ImGui::SeparatorText("Grass density");
+        ImGui::InputInt("Grass blades", &grassBladeCount, 100, 1000);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+            if (grassBladeCount < 1) grassBladeCount = 1;
+            if (grassBladeCount > 200000) grassBladeCount = 200000;
+            pendingGrassBladeCount = grassBladeCount;
+        }
         ImGui::SeparatorText("Grass culling / LOD");
+        ImGui::InputInt("LOD0 blades per cluster", &grassLod0BladeCount, 1, 1);
+        ImGui::InputInt("LOD1 blades per cluster", &grassLod1BladeCount, 1, 1);
+        grassLod0BladeCount = std::clamp(grassLod0BladeCount, 1, 4);
+        grassLod1BladeCount = std::clamp(grassLod1BladeCount, 1, 4);
         ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
         ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
         ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 6);
