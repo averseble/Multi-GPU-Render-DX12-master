@@ -994,17 +994,17 @@ void HybridParticleApp::CreateGO()
 
     auto grassField = std::make_unique<GameObject>("Grass Field");
     grassField->GetTransform()->SetPosition(Vector3::Up);
-    grassField->SetScale(1.5f);
-    auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice, 5000, 200.0f);
+    grassField->SetScale(5.5f);
+    auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice, 50000, 200.0f);
     grassField->AddComponent(grassEmitter);
     typedRenderer[static_cast<int>(RenderMode::Transparent)].push_back(grassEmitter);
     crossGrassEmitters.push_back(grassEmitter.get()); // ���� ����� ������ ��� ����������
     gameObjects.push_back(std::move(grassField));
 
      auto platform = std::make_unique<GameObject>();
-     platform->SetScale(1);
+     platform->SetScale(Vector3(1 , 1, 0.8f));
      platform->GetTransform()->SetEulerRotate(Vector3(0, 0, 0));
-     platform->GetTransform()->SetPosition(Vector3(700, 0, 100));
+     platform->GetTransform()->SetPosition(Vector3(680, 0, 100));
      auto renderer = std::make_shared<ModelRenderer>(primeDevice, models[L"platform"]);
      platform->AddComponent(renderer);
      typedRenderer[static_cast<int>(RenderMode::Opaque)].push_back(renderer);
@@ -1596,6 +1596,32 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
 
     if (ImGui::Begin("Hybrid GPU / adapter statistics", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
+        bool useMultiGpuRender = UseCrossAdapter;
+        if (ImGui::Checkbox("Use Multi-GPU render", &useMultiGpuRender))
+        {
+            UseCrossAdapter = useMultiGpuRender;
+            if (!UseCrossAdapter)
+            {
+                UseCrossSync = false;
+            }
+
+            for (auto* emitter : crossEmitter)
+            {
+                if (UseCrossAdapter)
+                    emitter->EnableShared();
+                else
+                    emitter->DisableShared();
+            }
+
+            for (auto* emitter : crossGrassEmitters)
+            {
+                if (UseCrossAdapter)
+                    emitter->EnableShared();
+                else
+                    emitter->DisableShared();
+            }
+        }
+
         ImGui::Text("Cross-adapter compute: %s", UseCrossAdapter ? "on (second GPU)" : "off (prime GPU)");
         ImGui::Text("Cross-adapter sync fences: %s", UseCrossSync ? "on" : "off");
         ImGui::SeparatorText("Frame limiter");

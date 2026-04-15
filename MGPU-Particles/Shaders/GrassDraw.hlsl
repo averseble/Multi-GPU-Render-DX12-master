@@ -127,14 +127,22 @@ struct GSOutput
     float3 WorldPos : WORLD_POS;
     float3 Normal : NORMAL;
     float Alpha : ALPHA;
+    float UseTexture : TEXCOORD1;
+    float BladeHeight01 : TEXCOORD2;
 };
 
-GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFactor)
+GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFactor, float useTexture, float bladeHeight01)
 {
     GSOutput output;
-    
-    float width = QuadSize * input.Scale * 0.5f;
-    float height = QuadSize * input.Scale;
+
+    float3 worldOrigin = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), World).xyz;
+    float3 worldAxisX = mul(float4(1.0f, 0.0f, 0.0f, 1.0f), World).xyz - worldOrigin;
+    float3 worldAxisY = mul(float4(0.0f, 1.0f, 0.0f, 1.0f), World).xyz - worldOrigin;
+    float objectScaleX = max(length(worldAxisX), 1e-3f);
+    float objectScaleY = max(length(worldAxisY), 1e-3f);
+
+    float width = QuadSize * input.Scale * 0.5f * objectScaleX;
+    float height = QuadSize * input.Scale * objectScaleY;
 
 #if GRASS_DEBUG_FIXED_WORLD
     const float3 debugCenterW = float3(0.0f, 0.0f, 0.0f);
@@ -173,11 +181,13 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     output.TexCoord = uv;
     output.Normal = float3(0, 1, 0);
     output.Alpha = 1.0f;
+    output.UseTexture = useTexture;
+    output.BladeHeight01 = bladeHeight01;
     
     return output;
 }
 
-[maxvertexcount(4)]
+[maxvertexcount(24)]
 void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
 {
     GSInput grass = input[0];
@@ -186,17 +196,26 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     float windPhase = grass.WorldPos.x * 0.5f + grass.WorldPos.z * 0.3f + grass.WindOffset;
     float windFactor = sin(Time * 2.0f + windPhase) * WindStrength;
     
-    // Создаем квад из 4 вершин
-    // Левый-нижний
-    triStream.Append(CreateQuadVertex(grass, float2(-1, -1), float2(0, 1), windFactor));
-    // Левый-верхний
-    triStream.Append(CreateQuadVertex(grass, float2(-1, 1), float2(0, 0), windFactor));
-    // Правый-нижний
-    triStream.Append(CreateQuadVertex(grass, float2(1, -1), float2(1, 1), windFactor));
-    // Правый-верхний
-    triStream.Append(CreateQuadVertex(grass, float2(1, 1), float2(1, 0), windFactor));
-    
-    triStream.RestartStrip();
+    // Single-GPU path: approximate LOD0 by segmenting close blades.
+    float distToEye = distance(EyePosW, grass.WorldPos);
+    bool useLod0 = distToEye <= 300.0f;
+    uint segments = useLod0 ? 4u : 1u;
+    float useTexture = useLod0 ? 0.0f : 1.0f;
+
+    [loop]
+    for (uint seg = 0u; seg < segments; ++seg)
+    {
+        float t0 = float(seg) / float(segments);
+        float t1 = float(seg + 1u) / float(segments);
+        float y0 = lerp(-1.0f, 1.0f, t0);
+        float y1 = lerp(-1.0f, 1.0f, t1);
+
+        triStream.Append(CreateQuadVertex(grass, float2(-1.0f, y0), float2(0.0f, 1.0f - t0), windFactor, useTexture, t0));
+        triStream.Append(CreateQuadVertex(grass, float2(-1.0f, y1), float2(0.0f, 1.0f - t1), windFactor, useTexture, t1));
+        triStream.Append(CreateQuadVertex(grass, float2(1.0f, y0), float2(1.0f, 1.0f - t0), windFactor, useTexture, t0));
+        triStream.Append(CreateQuadVertex(grass, float2(1.0f, y1), float2(1.0f, 1.0f - t1), windFactor, useTexture, t1));
+        triStream.RestartStrip();
+    }
 }
 
 // Пиксельный шейдер
@@ -207,13 +226,25 @@ struct PSInput
     float3 WorldPos : WORLD_POS;
     float3 Normal : NORMAL;
     float Alpha : ALPHA;
+    float UseTexture : TEXCOORD1;
+    float BladeHeight01 : TEXCOORD2;
 };
 
 float4 PS(PSInput input) : SV_Target
 {
-    float4 color = GrassTexture.Sample(Sampler, input.TexCoord);
-    
-    clip(color.a - 0.1f);
+    float4 color;
+    if (input.UseTexture > 0.5f)
+    {
+        color = GrassTexture.Sample(Sampler, input.TexCoord);
+        clip(color.a - 0.1f);
+    }
+    else
+    {
+        float t = saturate(input.BladeHeight01);
+        float3 base = float3(0.10f, 0.38f, 0.10f);
+        float3 tip = float3(0.32f, 0.78f, 0.20f);
+        color = float4(lerp(base, tip, t), 1.0f);
+    }
     
     // Простое освещение
     float3 lightDir = normalize(float3(0.5f, -0.5f, 0.5f));
@@ -250,7 +281,14 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
         return o;
     }
     GrassRenderVertex v = ExpandedGrassVertices[vertexID];
-    float4 posW = mul(float4(v.Position, 1.0f), World);
+    float3 pos = v.Position;
+    // Multi-GPU path: add frame-time wind deformation in VS so animation
+    // remains visible even if expanded vertices are not re-generated every frame.
+    // Use b1 (WorldConstants) only; expanded draw root signature does not bind b2.
+    float bladeHeight01 = saturate(1.0f - v.TexCoord.y);
+    float phase = pos.x * 0.5f + pos.z * 0.3f + TotalTime * 2.0f;
+    pos.x += sin(phase) * 0.8f * bladeHeight01;
+    float4 posW = mul(float4(pos, 1.0f), World);
     o.PositionH = mul(posW, ViewProj);
     o.TexCoord = v.TexCoord;
     o.WorldPos = posW.xyz;

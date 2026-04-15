@@ -19,7 +19,7 @@ CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> prim
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
     emitterData.AtlasTextureCount = 1;
 
-    // ˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜ ˜ 3 ˜˜˜˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ 3 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     primeGrassEmitter = std::make_shared<GrassEmitter>(primeDevice, grassCount, worldSize);
 
     InitPSO(secondDevice);
@@ -295,14 +295,14 @@ void CrossAdapterGrassEmitter::Update()
 {
     emitterData.Time += 0.016f;
 
-    // ˜˜˜˜˜˜˜˜˜˜˜˜˜ gameObject ˜˜˜ ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ gameObject ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (primeGrassEmitter && gameObject)
     {
         primeGrassEmitter->gameObject = gameObject;
         cullData.World = gameObject->GetTransform()->GetWorldMatrix().Transpose();
     }
 
-    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     primeGrassEmitter->UpdateConstants(emitterData);
     primeGrassEmitter->Update();
     
@@ -375,8 +375,8 @@ void CrossAdapterGrassEmitter::Dispatch(const std::shared_ptr<GCommandList>& cmd
 
     if (dirtyActivated == Disable)
     {
-        cmdList->CopyResource(primeGrassEmitter->GetGrassBuffer()->GetD3D12Resource(),
-            crossAdapterGrassBuffer->GetPrimeResource().GetD3D12Resource());
+        // Single-GPU path regenerates/uploads grass on prime in Update().
+        // Do not overwrite it with cross-adapter shadow resources here.
         dirtyActivated = None;
     }
 
@@ -465,6 +465,8 @@ void CrossAdapterGrassEmitter::DisableShared()
 {
     useSharedCompute = false;
     dirtyActivated = Disable;
+    // Prime grass buffer was only filled on GPU2 when shared; force CPU upload next Update.
+    needRegenerate = true;
 }
 
 void CrossAdapterGrassEmitter::SetWorldConstantsBuffer(const GBuffer* worldConstants)
