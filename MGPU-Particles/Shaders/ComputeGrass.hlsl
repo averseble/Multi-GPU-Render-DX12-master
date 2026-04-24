@@ -19,10 +19,13 @@ cbuffer GrassEmitterData : register(b0)
     float QuadSize;
     float Time;
     float WindStrength;
+    float WindIntensity;
+    float WindAmplitude;
     uint AtlasTextureCount;
     uint GpuStressIterations;
     uint Lod0BladeCount;
     uint Lod1BladeCount;
+    float2 WindDirection;
     float2 Padding;
 }
 
@@ -120,7 +123,7 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
     float height = QuadSize * grass.Scale;
     float cosR = cos(grass.Rotation);
     float sinR = sin(grass.Rotation);
-    float wind = sin(Time * 2.0f + grass.WindOffset) * WindStrength;
+    float wind = sin(Time * 2.0f * WindIntensity + grass.WindOffset) * WindStrength * WindAmplitude;
 
     float3 local[4];
     local[0] = float3(-width, -height, 0.0f);
@@ -196,16 +199,16 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             float t1 = float(seg + 1u) / float(segments);
 
             float windSeg = (wind + bladePhaseOffset);
-            float bend0 = t0;
-            float bend1 = t1;
+            float bend0 = t0 * t0;
+            float bend1 = t1 * t1;
 
             float taper0 = useLod0 ? lerp(1.0f, 0.12f, t0) : 1.0f;
             float taper1 = useLod0 ? lerp(1.0f, 0.12f, t1) : 1.0f;
             float w0 = bladeWidth * taper0;
             float w1 = bladeWidth * taper1;
 
-            float x0 = bladeCenter + windSeg * width * 1.6f * bend0;
-            float x1 = bladeCenter + windSeg * width * 1.6f * bend1;
+            float x0 = bladeCenter;
+            float x1 = bladeCenter;
 
             float y0 = lerp(-height, height, t0);
             float y1 = lerp(-height, height, t1);
@@ -231,6 +234,23 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             rtR.x = tR.x * cosR - tR.z * sinR + grass.Position.x;
             rtR.z = tR.x * sinR + tR.z * cosR + grass.Position.z;
             rtR.y = tR.y + grass.Position.y;
+
+            float2 windDir = WindDirection;
+            if (dot(windDir, windDir) < 1e-6f) windDir = float2(1.0f, 0.0f);
+            windDir = normalize(windDir);
+            float bendWorld0 = (0.7f + 0.3f * windSeg) * WindStrength * width * 1.6f * bend0;
+            float bendWorld1 = (0.7f + 0.3f * windSeg) * WindStrength * width * 1.6f * bend1;
+            float2 offset0 = windDir * bendWorld0;
+            float2 offset1 = windDir * bendWorld1;
+            rbL.xz += offset0;
+            rbR.xz += offset0;
+            rtL.xz += offset1;
+            rtR.xz += offset1;
+            // Apply tip droop proportional to bend for curved blade shape.
+            rbL.y -= abs(bendWorld0) * 0.35f * bend0;
+            rbR.y -= abs(bendWorld0) * 0.35f * bend0;
+            rtL.y -= abs(bendWorld1) * 0.35f * bend1;
+            rtR.y -= abs(bendWorld1) * 0.35f * bend1;
 
             uint dst = baseVertex + blade * (segments * 6u) + seg * 6u;
             float useTexture = useLod0 ? 0.0f : 1.0f;

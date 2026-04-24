@@ -16,10 +16,13 @@ CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> prim
     emitterData.WorldSize = worldSize;
     emitterData.QuadSize = 10.0f;
     emitterData.WindStrength = 0.5f;
+    emitterData.WindIntensity = 1.0f;
+    emitterData.WindAmplitude = 1.0f;
     emitterData.Time = 0.0f;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
     emitterData.Lod0BladeCount = std::max(1u, std::min(lod0BladeCount, kMaxBladeCount));
     emitterData.Lod1BladeCount = std::max(1u, std::min(lod1BladeCount, kMaxBladeCount));
+    emitterData.WindDirection = Vector2(1.0f, 0.0f);
     emitterData.AtlasTextureCount = 1;
 
     // ������� �������� ������� � 3 �����������
@@ -438,6 +441,46 @@ void CrossAdapterGrassEmitter::Dispatch(const std::shared_ptr<GCommandList>& cmd
 void CrossAdapterGrassEmitter::SetWindStrength(float strength)
 {
     emitterData.WindStrength = strength;
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWindStrength(strength);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetWindIntensity(float intensity)
+{
+    emitterData.WindIntensity = std::max(0.0f, intensity);
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWindIntensity(emitterData.WindIntensity);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetWindAmplitude(float amplitude)
+{
+    emitterData.WindAmplitude = std::max(0.0f, amplitude);
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWindAmplitude(emitterData.WindAmplitude);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetWindDirection(const Vector2& direction)
+{
+    Vector2 d = direction;
+    if (d.LengthSquared() < 1e-6f)
+    {
+        d = Vector2(1.0f, 0.0f);
+    }
+    else
+    {
+        d.Normalize();
+    }
+    emitterData.WindDirection = d;
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWindDirection(d);
+    }
 }
 
 void CrossAdapterGrassEmitter::SetWorldSize(float size)

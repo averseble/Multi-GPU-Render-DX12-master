@@ -43,10 +43,13 @@ cbuffer GrassEmitterData : register(b2)
     float QuadSize;
     float Time;
     float WindStrength;
+    float WindIntensity;
+    float WindAmplitude;
     uint AtlasTextureCount;
     uint GpuStressIterations;
     uint Lod0BladeCount;
     uint Lod1BladeCount;
+    float2 WindDirection;
     float2 Padding2;
 }
 
@@ -171,7 +174,16 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     float sideOffset = offset.x * width;
     float verticalOffset = offset.y * height;
     float bendFactor = saturate((offset.y + 1.0f) * 0.5f);
-    sideOffset += windFactor * width * 1.6f * bendFactor;
+    float bendProfile = bendFactor * bendFactor;
+    float2 windDir = WindDirection;
+    if (dot(windDir, windDir) < 1e-6f) windDir = float2(1.0f, 0.0f);
+    windDir = normalize(windDir);
+    float2 bladeRightXZ = normalize(float2(rotatedRight.x, rotatedRight.z));
+    float dirAlign = dot(windDir, bladeRightXZ);
+    float directionalBend = (0.7f + 0.3f * windFactor) * WindStrength * WindAmplitude * width * 1.6f * bendProfile;
+    sideOffset += directionalBend * dirAlign;
+    // Natural blade arc: as wind bends the tip, it also slightly droops down.
+    verticalOffset -= abs(directionalBend) * 0.35f * bendProfile;
 
     float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset;
 #endif
@@ -194,7 +206,7 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     
     // Эффект ветра
     float windPhase = grass.WorldPos.x * 0.5f + grass.WorldPos.z * 0.3f + grass.WindOffset;
-    float windFactor = sin(Time * 2.0f + windPhase) * WindStrength;
+    float windFactor = sin(Time * 2.0f * WindIntensity + windPhase);
     
     // Single-GPU path: approximate LOD0 by segmenting close blades.
     float distToEye = distance(EyePosW, grass.WorldPos);
@@ -332,7 +344,8 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
     // Use b1 (WorldConstants) only; expanded draw root signature does not bind b2.
     float bladeHeight01 = saturate(1.0f - v.TexCoord.y);
     float phase = pos.x * 0.5f + pos.z * 0.3f + TotalTime * 2.0f;
-    pos.x += sin(phase) * 0.8f * bladeHeight01;
+    float bend = (0.7f + 0.3f * sin(phase)) * bladeHeight01;
+    pos.x += 0.8f * bend;
     float4 posW = mul(float4(pos, 1.0f), World);
     o.PositionH = mul(posW, ViewProj);
     o.TexCoord = v.TexCoord;

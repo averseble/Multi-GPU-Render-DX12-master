@@ -9,15 +9,18 @@ GrassEmitter::GrassEmitter(std::shared_ptr<GDevice> dev, uint32_t grassCount, fl
                            uint32_t lod0BladeCount, uint32_t lod1BladeCount)
     : device(dev)
 {
-    // ˜˜˜˜˜˜ ˜˜˜˜˜˜ ˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
     emitterData.GrassCount = grassCount;
     emitterData.WorldSize = worldSize;
     emitterData.QuadSize = 10.0f;
     emitterData.WindStrength = 0.5f;
+    emitterData.WindIntensity = 1.0f;
+    emitterData.WindAmplitude = 1.0f;
     emitterData.Time = 0.0f;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
     emitterData.Lod0BladeCount = std::max(1u, lod0BladeCount);
     emitterData.Lod1BladeCount = std::max(1u, lod1BladeCount);
+    emitterData.WindDirection = Vector2(1.0f, 0.0f);
     emitterData.AtlasTextureCount = Atlas.size();
 
     Initialize();
@@ -29,12 +32,12 @@ GrassEmitter::~GrassEmitter()
 
 void GrassEmitter::Initialize()
 {
-    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜ ˜˜˜˜˜ (˜˜˜ ˜ ParticleEmitter)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ ï¿½ ParticleEmitter)
     {
         auto queue = device->GetCommandQueue(GQueueType::Compute);
         auto cmdList = queue->GetCommandList();
 
-        // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜ ˜˜˜˜˜
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
         Atlas.push_back(GTexture::LoadTextureFromFile(L"Data\\Textures\\grass.dds", cmdList, TextureUsage::Albedo));
 
 
@@ -43,7 +46,7 @@ void GrassEmitter::Initialize()
         emitterData.AtlasTextureCount = Atlas.size();
     }
 
-    // ˜˜˜˜˜˜˜˜˜˜ mipmaps ˜˜˜ ˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ mipmaps ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     {
         auto queue = device->GetCommandQueue(GQueueType::Compute);
         auto cmdList = queue->GetCommandList();
@@ -66,40 +69,40 @@ void GrassEmitter::Initialize()
     }
 
 
-    // ˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     CreateRootSignatures();
 
-    // ˜˜˜˜˜˜˜ PSO
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ PSO
     CreatePipelineState();
 
-    // ˜˜˜˜˜˜˜ compute ˜˜˜˜˜˜ (˜˜˜˜˜˜˜˜˜˜˜)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ compute ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
     CreateComputeShaders();
 
-    // ˜˜˜˜˜˜˜ ˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     CreateBuffers();
 
-    // ˜˜˜˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     DescriptorInitialize();
 
-    // ˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     Regenerate();
 }
 
 void GrassEmitter::CreateRootSignatures()
 {
-    // ˜˜˜ ˜˜˜˜˜˜˜ - ˜˜˜˜˜˜ ˜˜˜˜ SRV ˜˜˜ ˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ SRV ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     CD3DX12_DESCRIPTOR_RANGE range[2];
     range[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // Grass buffer (t0)
-    range[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // Grass texture (t1) - ˜˜˜˜ ˜˜˜˜˜˜˜˜
+    range[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // Grass texture (t1) - ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     
     renderSignature = std::make_shared<GRootSignature>();
-    renderSignature->AddConstantBufferParameter(0); // b0 - ObjectConstants (˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜)
-    renderSignature->AddConstantBufferParameter(1); // b1 - WorldConstants (View, Proj) - ˜˜ ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜
+    renderSignature->AddConstantBufferParameter(0); // b0 - ObjectConstants (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+    renderSignature->AddConstantBufferParameter(1); // b1 - WorldConstants (View, Proj) - ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     renderSignature->AddConstantBufferParameter(2); // b2 - GrassEmitterData
     renderSignature->AddDescriptorParameter(&range[0], 1); // Grass buffer SRV
-    renderSignature->AddDescriptorParameter(&range[1], 1); // ˜˜˜˜ ˜˜˜˜˜˜˜˜ SRV
+    renderSignature->AddDescriptorParameter(&range[1], 1); // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SRV
     
-    // ˜˜˜˜ ˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     CD3DX12_STATIC_SAMPLER_DESC sampler(
         0,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -110,7 +113,7 @@ void GrassEmitter::CreateRootSignatures()
     
     renderSignature->Initialize(device);
     
-    // ˜˜˜ compute (˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜)
+    // ï¿½ï¿½ï¿½ compute (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
     if (useGPUGeneration)
     {
         CD3DX12_DESCRIPTOR_RANGE uavRange;
@@ -141,10 +144,10 @@ void GrassEmitter::CreatePipelineState()
     psoDesc.PS = pixelShader->GetShaderResource();
     psoDesc.GS = geometryShader->GetShaderResource();
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // ˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜˜
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
-    // ˜˜˜˜˜-˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     D3D12_RENDER_TARGET_BLEND_DESC blendDesc = {};
     blendDesc.BlendEnable = true;
     blendDesc.LogicOpEnable = false;
@@ -195,10 +198,10 @@ void GrassEmitter::CreateComputeShaders()
 
 void GrassEmitter::CreateBuffers()
 {
-    // ˜˜˜˜˜ ˜˜˜ ObjectConstants (˜˜˜ ˜ ParticleEmitter)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ObjectConstants (ï¿½ï¿½ï¿½ ï¿½ ParticleEmitter)
     objectPositionBuffer = std::make_shared<ConstantUploadBuffer<ObjectConstants>>(device, 1, L"Grass Object Position");
 
-    // ˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜ ˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     grassBuffer = std::make_shared<GBuffer>(
         device,
         sizeof(GrassData),
@@ -207,7 +210,7 @@ void GrassEmitter::CreateBuffers()
         useGPUGeneration ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE
     );
 
-    // ˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜ ˜˜˜ GrassEmitterData
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ GrassEmitterData
     constantBuffer = std::make_shared<GBuffer>(
         device,
         sizeof(GrassEmitterData),
@@ -215,19 +218,19 @@ void GrassEmitter::CreateBuffers()
         L"Grass Emitter Constant Buffer"
     );
 
-    // CPU ˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜˜˜˜
+    // CPU ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     grassDataCPU.resize(emitterData.GrassCount);
 }
 
 void GrassEmitter::DescriptorInitialize()
 {
-    // ˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜ ˜˜˜˜˜˜˜: grass buffer SRV + ˜˜˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: grass buffer SRV + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     grassDescriptors = device->AllocateDescriptors(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-        1 + Atlas.size() // grass buffer + ˜˜˜ ˜˜˜˜˜˜˜˜
+        1 + Atlas.size() // grass buffer + ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     );
 
-    // SRV ˜˜˜ ˜˜˜˜˜˜ ˜˜˜˜˜
+    // SRV ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_UNKNOWN;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -239,7 +242,7 @@ void GrassEmitter::DescriptorInitialize()
 
     grassBuffer->CreateShaderResourceView(&srvDesc, &grassDescriptors, 0);
 
-    // SRV ˜˜˜ ˜˜˜˜˜˜˜ (˜˜˜ ˜ ParticleEmitter)
+    // SRV ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ ï¿½ ParticleEmitter)
     D3D12_SHADER_RESOURCE_VIEW_DESC texSrvDesc = {};
     texSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     texSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -258,7 +261,7 @@ void GrassEmitter::DescriptorInitialize()
         texture->CreateShaderResourceView(&texSrvDesc, &grassDescriptors, 1 + i);
     }
 
-    // ˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜ GPU ˜˜˜˜˜˜˜˜˜, ˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜ compute
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ GPU ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ compute
     if (useGPUGeneration)
     {
         computeDescriptors = device->AllocateDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1);
@@ -278,7 +281,7 @@ void GrassEmitter::DescriptorInitialize()
 
 void GrassEmitter::GenerateGrassDataCPU()
 {
-    // ˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜˜ ˜˜ ˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     float cellSize = emitterData.WorldSize / static_cast<float>(emitterData.GridSize);
     float halfWorld = emitterData.WorldSize * 0.5f;
 
@@ -289,11 +292,11 @@ void GrassEmitter::GenerateGrassDataCPU()
 
         if (z >= emitterData.GridSize) break;
 
-        // ˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜ ˜ ˜˜˜˜˜
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
         float posX = (static_cast<float>(x) + 0.5f) * cellSize - halfWorld;
         float posZ = (static_cast<float>(z) + 0.5f) * cellSize - halfWorld;
 
-        // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         posX += MathHelper::RandF(-cellSize * 0.4f, cellSize * 0.4f);
         posZ += MathHelper::RandF(-cellSize * 0.4f, cellSize * 0.4f);
 
@@ -338,11 +341,25 @@ void GrassEmitter::SetLodBladeCounts(uint32_t lod0BladeCount, uint32_t lod1Blade
     emitterData.Lod1BladeCount = std::max(1u, lod1BladeCount);
 }
 
+void GrassEmitter::SetWindDirection(const Vector2& direction)
+{
+    Vector2 d = direction;
+    if (d.LengthSquared() < 1e-6f)
+    {
+        d = Vector2(1.0f, 0.0f);
+    }
+    else
+    {
+        d.Normalize();
+    }
+    emitterData.WindDirection = d;
+}
+
 void GrassEmitter::Update()
 {
-    if (!gameObject) return; // ˜˜˜˜˜˜ ˜˜ nullptr
-    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜
-    emitterData.Time += 0.016f; // ˜˜˜˜˜˜˜˜ 60 FPS
+    if (!gameObject) return; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ nullptr
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    emitterData.Time += 0.016f; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 60 FPS
 
     // Always refresh object constants. After dynamic grass-count changes, the
     // upload buffer is recreated and must be repopulated even if transform
@@ -352,12 +369,12 @@ void GrassEmitter::Update()
     objectWorldData.World = (transform->GetWorldMatrix()).Transpose();
     objectPositionBuffer->CopyData(0, objectWorldData);
 
-    // ˜˜˜˜ ˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (needRegenerate)
     {
         if (!useGPUGeneration)
         {
-            // ˜˜˜˜˜˜˜˜˜ ˜˜ CPU
+            // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ CPU
             GenerateGrassDataCPU();
 
             auto queue = device->GetCommandQueue(GQueueType::Compute);
@@ -375,7 +392,7 @@ void GrassEmitter::Update()
         needRegenerate = false;
     }
 
-    // ˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜˜˜˜˜ ˜˜˜˜˜
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     auto queue = device->GetCommandQueue(GQueueType::Copy);
     auto cmdList = queue->GetCommandList();
     constantBuffer->LoadData(&emitterData, cmdList);
@@ -392,7 +409,7 @@ void GrassEmitter::Draw(const std::shared_ptr<GCommandList>& cmdList)
 
     cmdList->SetDescriptorsHeap(&grassDescriptors);
 
-    // b0 - ObjectConstants (˜˜˜˜˜˜˜ ˜˜˜˜˜˜˜)
+    // b0 - ObjectConstants (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
     cmdList->SetRootConstantBufferView(0, *objectPositionBuffer.get());
 
     // b1 - WorldConstants must be explicitly rebound for this root signature.
@@ -431,7 +448,7 @@ void GrassEmitter::Dispatch(const std::shared_ptr<GCommandList>& cmdList)
         cmdList->SetRootConstantBufferView(0, *constantBuffer);
         cmdList->SetRootDescriptorTable(1, &computeDescriptors, 0);
 
-        // ˜˜˜˜˜˜˜˜˜ compute ˜˜˜˜˜˜
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ compute ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         uint32_t threadGroups = (emitterData.GrassCount + 1023) / 1024;
         cmdList->Dispatch(threadGroups, 1, 1);
 

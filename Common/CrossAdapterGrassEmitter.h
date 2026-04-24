@@ -20,6 +20,9 @@ public:
     void Dispatch(const std::shared_ptr<GCommandList>& cmdList);
 
     void SetWindStrength(float strength);
+    void SetWindIntensity(float intensity);
+    void SetWindAmplitude(float amplitude);
+    void SetWindDirection(const Vector2& direction);
     void SetWorldSize(float size);
     void SetGrassCount(uint32_t count);
     void SetLodBladeCounts(uint32_t lod0BladeCount, uint32_t lod1BladeCount);

@@ -114,6 +114,9 @@ void HybridParticleApp::Update(const GameTimer& gt)
     {
         emitter->SetLodBladeCounts(static_cast<uint32_t>(std::max(1, grassLod0BladeCount)),
                                    static_cast<uint32_t>(std::max(1, grassLod1BladeCount)));
+        emitter->SetWindIntensity(std::max(0.0f, grassWindIntensity));
+        emitter->SetWindAmplitude(std::max(0.0f, grassWindAmplitude));
+        emitter->SetWindDirection(grassWindDirection);
     }
 
     const UINT olderIndex = currentFrameResourceIndex - 1 > globalCountFrameResources
@@ -1659,6 +1662,19 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         ImGui::InputInt("LOD1 blades per cluster", &grassLod1BladeCount, 1, 1);
         grassLod0BladeCount = std::clamp(grassLod0BladeCount, 1, 4);
         grassLod1BladeCount = std::clamp(grassLod1BladeCount, 1, 4);
+        float windDir[2] = { grassWindDirection.x, grassWindDirection.y };
+        ImGui::InputFloat2("Wind direction (XZ)", windDir, "%.2f");
+        grassWindDirection = Vector2(windDir[0], windDir[1]);
+        if (grassWindDirection.LengthSquared() < 1e-6f)
+        {
+            grassWindDirection = Vector2(1.0f, 0.0f);
+        }
+        else
+        {
+            grassWindDirection.Normalize();
+        }
+        ImGui::SliderFloat("Wind intensity", &grassWindIntensity, 0.0f, 200.0f, "%.2f");
+        ImGui::SliderFloat("Wind amplitude", &grassWindAmplitude, 0.0f, 200.0f, "%.2f");
         ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
         ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
         ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 6);

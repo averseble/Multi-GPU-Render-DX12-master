@@ -169,6 +169,9 @@ protected:
     int grassLod0BladeCount = 3;
     int grassLod1BladeCount = 1;
     float grassWindTessellationScale = 4.0f;
+    float grassWindIntensity = 1.0f;
+    float grassWindAmplitude = 1.0f;
+    Vector2 grassWindDirection = Vector2(1.0f, 0.0f);
     int grassBladeCount = 5000;
     int pendingGrassBladeCount = -1;
     bool fpsLimitEnabled = true;

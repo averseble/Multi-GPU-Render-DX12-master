@@ -31,10 +31,13 @@ struct GrassEmitterData
     float QuadSize;                 // ������ �����
     float Time;                     // ����� ��� ��������
     float WindStrength;             // ���� �����
+    float WindIntensity = 1.0f;
+    float WindAmplitude = 1.0f;
     uint32_t AtlasTextureCount;      // ���������� �������
     uint32_t GpuStressIterations = 0;
     uint32_t Lod0BladeCount = 3;
     uint32_t Lod1BladeCount = 1;
+    Vector2 WindDirection = Vector2(1.0f, 0.0f);
     float Padding[2];                // ������������ �� 16-������� �������
 };
 
