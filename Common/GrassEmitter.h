@@ -19,6 +19,28 @@ public:
     void SetWindStrength(float strength) { emitterData.WindStrength = strength; }
     void SetWindIntensity(float intensity) { emitterData.WindIntensity = intensity; }
     void SetWindAmplitude(float amplitude) { emitterData.WindAmplitude = amplitude; }
+    void SetLodBladeSize(float lod0WidthScale, float lod0HeightScale, float lod1WidthScale, float lod1HeightScale)
+    {
+        emitterData.Lod0BladeWidthScale = lod0WidthScale < 0.05f ? 0.05f : lod0WidthScale;
+        emitterData.Lod0BladeHeightScale = lod0HeightScale < 0.05f ? 0.05f : lod0HeightScale;
+        emitterData.Lod1BladeWidthScale = lod1WidthScale < 0.05f ? 0.05f : lod1WidthScale;
+        emitterData.Lod1BladeHeightScale = lod1HeightScale < 0.05f ? 0.05f : lod1HeightScale;
+    }
+    void SetLod0Sdof(float naturalFreq, float dampingRatio)
+    {
+        emitterData.Lod0SdofNaturalFreq = naturalFreq < 0.05f ? 0.05f : naturalFreq;
+        emitterData.Lod0SdofDampingRatio = dampingRatio < 0.01f ? 0.01f : dampingRatio;
+    }
+    void SetWindGradient(uint32_t originCount, float falloff,
+                         const Vector4* originData, const Vector4* directionData);
+    void SetFieldInfluenceScale(float scale)
+    {
+        emitterData.FieldInfluenceScale = scale < 0.0f ? 0.0f : scale;
+    }
+    void SetDebugNearestOriginTint(bool enabled)
+    {
+        emitterData.DebugNearestOriginTint = enabled ? 1.0f : 0.0f;
+    }
     void SetWindDirection(const Vector2& direction);
     void SetWorldSize(float size) { emitterData.WorldSize = size; needRegenerate = true; }
     void SetGrassCount(uint32_t count);

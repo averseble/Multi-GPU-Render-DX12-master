@@ -21,12 +21,26 @@ cbuffer GrassEmitterData : register(b0)
     float WindStrength;
     float WindIntensity;
     float WindAmplitude;
+    float Lod0BladeWidthScale;
+    float Lod0BladeHeightScale;
+    float Lod1BladeWidthScale;
+    float Lod1BladeHeightScale;
+    float Lod0SdofNaturalFreq;
+    float Lod0SdofDampingRatio;
+    float Lod0DistanceThreshold;
+    float Lod1DistanceThreshold;
     uint AtlasTextureCount;
     uint GpuStressIterations;
     uint Lod0BladeCount;
     uint Lod1BladeCount;
     float2 WindDirection;
-    float2 Padding;
+    uint WindOriginCount;
+    float WindMapFalloff;
+    float FieldInfluenceScale;
+    float DebugNearestOriginTint;
+    float Padding;
+    float4 WindOriginData[4];
+    float4 WindDirectionData[4];
 }
 
 cbuffer GrassCullData : register(b1)
@@ -36,6 +50,7 @@ cbuffer GrassCullData : register(b1)
     float3 EyePos;
     float MaxDistance;
     float Lod0Distance;
+    float Lod1Distance;
     uint Lod0BaseSegments;
     float WindTessellationScale;
     float Padding0;
@@ -63,6 +78,71 @@ float Rand(float2 uv)
 float RandRange(float2 uv, float minVal, float maxVal)
 {
     return lerp(minVal, maxVal, Rand(uv));
+}
+
+float2 SampleWindGradient(float3 worldPos, float2 fallbackDir)
+{
+    float2 accum = float2(0.0f, 0.0f);
+    float wsum = 0.0f;
+    uint count = min(WindOriginCount, 4u);
+    [loop]
+    for (uint i = 0u; i < count; ++i)
+    {
+        float3 origin = WindOriginData[i].xyz;
+        float radius = max(1.0f, WindOriginData[i].w);
+        float2 dir = WindDirectionData[i].xy;
+        float strength = max(0.0f, WindDirectionData[i].w);
+        float d = distance(worldPos.xz, origin.xz);
+        float t = saturate(1.0f - d / radius);
+        float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
+        if (dot(dir, dir) > 1e-6f && w > 1e-6f)
+        {
+            accum += normalize(dir) * w;
+            wsum += w;
+        }
+    }
+    if (wsum > 1e-6f)
+    {
+        float2 dir = normalize(accum);
+        float mag = saturate(wsum / max(1.0f, float(count)));
+        return dir * mag;
+    }
+    float2 d0 = fallbackDir;
+    if (dot(d0, d0) < 1e-6f) d0 = float2(1.0f, 0.0f);
+    return normalize(d0);
+}
+
+float2 SampleNearestWindVector(float3 worldPos, float2 fallbackDir)
+{
+    uint count = min(WindOriginCount, 4u);
+    float bestMetric = 1e30f;
+    float2 bestVec = float2(0.0f, 0.0f);
+    [loop]
+    for (uint i = 0u; i < count; ++i)
+    {
+        float3 origin = WindOriginData[i].xyz;
+        float radius = max(1.0f, WindOriginData[i].w);
+        float2 dir = WindDirectionData[i].xy;
+        float strength = max(0.0f, WindDirectionData[i].w);
+        if (dot(dir, dir) < 1e-6f || strength <= 1e-6f)
+            continue;
+        float d = distance(worldPos.xz, origin.xz);
+        float nd = d / radius;
+        // Choose nearest by physical distance to avoid large-radius bias
+        // forcing one origin to dominate the entire field direction.
+        if (d < bestMetric)
+        {
+            bestMetric = d;
+            float t = saturate(1.0f - nd);
+            float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
+            bestVec = normalize(dir) * w;
+        }
+    }
+    if (dot(bestVec, bestVec) > 1e-6f)
+    {
+        return bestVec;
+    }
+    return SampleWindGradient(worldPos, fallbackDir);
 }
 
 [numthreads(64, 1, 1)]
@@ -119,30 +199,12 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     GrassData grass = GrassInput[grassIndex];
 
-    float width = QuadSize * grass.Scale * 0.5f;
-    float height = QuadSize * grass.Scale;
+    float baseWidth = QuadSize * grass.Scale * 0.5f;
+    float baseHeight = QuadSize * grass.Scale;
     float cosR = cos(grass.Rotation);
     float sinR = sin(grass.Rotation);
-    float wind = sin(Time * 2.0f * WindIntensity + grass.WindOffset) * WindStrength * WindAmplitude;
-
-    float3 local[4];
-    local[0] = float3(-width, -height, 0.0f);
-    local[1] = float3(-width,  height, 0.0f);
-    local[2] = float3( width, -height, 0.0f);
-    local[3] = float3( width,  height, 0.0f);
-
-    local[1].x += wind * width * 2.0f;
-    local[3].x += wind * width * 2.0f;
-
-    float3 p[4];
-    [unroll]
-    for (uint i = 0; i < 4; ++i)
-    {
-        float3 o = local[i];
-        p[i].x = o.x * cosR - o.z * sinR + grass.Position.x;
-        p[i].z = o.x * sinR + o.z * cosR + grass.Position.z;
-        p[i].y = o.y + grass.Position.y;
-    }
+    float forceOmega = max(0.01f, 2.0f * WindIntensity);
+    float forceSignal = sin(Time * forceOmega + grass.WindOffset);
 
     float4 worldCenter = mul(float4(grass.Position, 1.0f), World);
     float3 toEye = worldCenter.xyz - EyePos;
@@ -169,6 +231,27 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float distToEye = length(toEye);
     bool useLod0 = distToEye <= Lod0Distance;
+    bool useLod1 = !useLod0 && distToEye <= Lod1Distance;
+    bool useLod2 = !useLod0 && !useLod1;
+    float wind = forceSignal;
+    if (useLod0)
+    {
+        forceOmega = 2.0f;
+        float wn = max(0.05f, Lod0SdofNaturalFreq);
+        float zeta = max(0.01f, Lod0SdofDampingRatio);
+        float num = wn * wn;
+        float denA = (wn * wn - forceOmega * forceOmega);
+        float denB = (2.0f * zeta * wn * forceOmega);
+        float gain = num / sqrt(max(1e-6f, denA * denA + denB * denB));
+        float phaseLag = atan2(denB, denA);
+        wind = sin(Time * forceOmega + grass.WindOffset - phaseLag) * gain;
+    }
+    float ampScale = useLod0 ? 1.0f : WindAmplitude;
+    wind *= (WindStrength * ampScale);
+    float lodWidthScale = useLod0 ? Lod0BladeWidthScale : Lod1BladeWidthScale;
+    float lodHeightScale = useLod0 ? Lod0BladeHeightScale : Lod1BladeHeightScale;
+    float width = baseWidth * max(lodWidthScale, 0.05f);
+    float height = baseHeight * max(lodHeightScale, 0.05f);
     uint segments = 1u;
     if (useLod0)
     {
@@ -178,6 +261,11 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     uint bladeCount = useLod0 ? clamp(Lod0BladeCount, 1u, 4u) : clamp(Lod1BladeCount, 1u, 4u);
+    if (useLod2)
+    {
+        bladeCount = 1u;
+        segments = 1u;
+    }
     uint vertexCount = bladeCount * segments * 6u;
     uint baseVertex;
     InterlockedAdd(VisibleVertexCounter[0], vertexCount, baseVertex);
@@ -198,7 +286,7 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             float t0 = float(seg) / float(segments);
             float t1 = float(seg + 1u) / float(segments);
 
-            float windSeg = (wind + bladePhaseOffset);
+            float windSeg = useLod2 ? 0.0f : (wind + bladePhaseOffset);
             float bend0 = t0 * t0;
             float bend1 = t1 * t1;
 
@@ -210,8 +298,8 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             float x0 = bladeCenter;
             float x1 = bladeCenter;
 
-            float y0 = lerp(-height, height, t0);
-            float y1 = lerp(-height, height, t1);
+            float y0 = lerp(0.0f, height, t0);
+            float y1 = lerp(0.0f, height, t1);
 
             float3 bL = float3(x0 - w0, y0, 0.0f);
             float3 bR = float3(x0 + w0, y0, 0.0f);
@@ -235,11 +323,15 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             rtR.z = tR.x * sinR + tR.z * cosR + grass.Position.z;
             rtR.y = tR.y + grass.Position.y;
 
-            float2 windDir = WindDirection;
-            if (dot(windDir, windDir) < 1e-6f) windDir = float2(1.0f, 0.0f);
-            windDir = normalize(windDir);
-            float bendWorld0 = (0.7f + 0.3f * windSeg) * WindStrength * width * 1.6f * bend0;
-            float bendWorld1 = (0.7f + 0.3f * windSeg) * WindStrength * width * 1.6f * bend1;
+            float2 windVec = useLod0
+                ? SampleNearestWindVector(worldCenter.xyz, WindDirection)
+                : SampleWindGradient(worldCenter.xyz, WindDirection);
+            float2 windDir = (dot(windVec, windVec) > 1e-6f) ? normalize(windVec) : float2(1.0f, 0.0f);
+            float windFieldStrength = clamp(length(windVec) * FieldInfluenceScale, 0.0f, 8.0f);
+            float directionalResponse = windSeg;
+            float staticLay = useLod0 ? (0.9f * windFieldStrength) : 0.0f;
+            float bendWorld0 = (staticLay + directionalResponse) * WindStrength * windFieldStrength * width * 1.6f * bend0;
+            float bendWorld1 = (staticLay + directionalResponse) * WindStrength * windFieldStrength * width * 1.6f * bend1;
             float2 offset0 = windDir * bendWorld0;
             float2 offset1 = windDir * bendWorld1;
             rbL.xz += offset0;

@@ -16,6 +16,7 @@
 #include "GDescriptor.h"
 #include "Light.h"
 #include <d3d12.h>
+#include <array>
 
 struct ImGui_ImplDX12_InitInfo;
 
@@ -165,14 +166,42 @@ protected:
     bool imguiFontDescriptorInUse = false;
     float grassCullMaxDistance = 1800.0f;
     float grassLod0Distance = 350.0f;
+    float grassLod1Distance = 1000.0f;
     int grassLod0BaseSegments = 4;
     int grassLod0BladeCount = 3;
     int grassLod1BladeCount = 1;
     float grassWindTessellationScale = 4.0f;
     float grassWindIntensity = 1.0f;
     float grassWindAmplitude = 1.0f;
+    float grassLod0SdofNaturalFreq = 2.5f;
+    float grassLod0SdofDampingRatio = 0.35f;
+    float grassLod0BladeWidthScale = 1.0f;
+    float grassLod0BladeHeightScale = 1.0f;
+    float grassLod1BladeWidthScale = 1.0f;
+    float grassLod1BladeHeightScale = 1.0f;
     Vector2 grassWindDirection = Vector2(1.0f, 0.0f);
+    int grassWindOriginCount = 2;
+    float grassWindMapFalloff = 1.5f;
+    float grassFieldInfluenceScale = 1.0f;
+    std::array<Vector4, 4> grassWindOrigins =
+    {
+        Vector4(-250.0f, 0.0f, -250.0f, 900.0f),
+        Vector4( 350.0f, 0.0f,  120.0f, 900.0f),
+        Vector4(   0.0f, 0.0f,    0.0f, 900.0f),
+        Vector4(   0.0f, 0.0f,    0.0f, 900.0f)
+    };
+    std::array<Vector4, 4> grassWindDirections =
+    {
+        Vector4( 1.0f,  0.2f, 0.0f, 1.0f),
+        Vector4(-0.6f,  1.0f, 0.0f, 1.0f),
+        Vector4( 1.0f,  0.0f, 0.0f, 1.0f),
+        Vector4( 1.0f,  0.0f, 0.0f, 1.0f)
+    };
+    bool showWindFieldDebug = false;
+    bool debugNearestOriginTint = false;
+    int windFieldGridResolution = 12;
     int grassBladeCount = 5000;
+    float grassWorldSize = 200.0f;
     int pendingGrassBladeCount = -1;
     bool fpsLimitEnabled = true;
     int fpsLimitTarget = 60;

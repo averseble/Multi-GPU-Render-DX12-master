@@ -22,6 +22,12 @@ public:
     void SetWindStrength(float strength);
     void SetWindIntensity(float intensity);
     void SetWindAmplitude(float amplitude);
+    void SetLodBladeSize(float lod0WidthScale, float lod0HeightScale, float lod1WidthScale, float lod1HeightScale);
+    void SetLod0Sdof(float naturalFreq, float dampingRatio);
+    void SetWindGradient(uint32_t originCount, float falloff,
+                         const Vector4* originData, const Vector4* directionData);
+    void SetFieldInfluenceScale(float scale);
+    void SetDebugNearestOriginTint(bool enabled);
     void SetWindDirection(const Vector2& direction);
     void SetWorldSize(float size);
     void SetGrassCount(uint32_t count);
@@ -32,7 +38,8 @@ public:
     void DisableShared();
     void SetWorldConstantsBuffer(const GBuffer* worldConstants);
     void SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, float maxDistance = 1500.0f,
-                               float lod0Distance = 300.0f, uint32_t lod0BaseSegments = 4,
+                               float lod0Distance = 300.0f, float lod1Distance = 900.0f,
+                               uint32_t lod0BaseSegments = 4,
                                float windTessellationScale = 4.0f);
 
 

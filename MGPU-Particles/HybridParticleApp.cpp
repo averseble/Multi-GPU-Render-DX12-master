@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 #include "CameraController.h"
 #include "CrossAdapterParticleEmitter.h"
@@ -116,6 +118,14 @@ void HybridParticleApp::Update(const GameTimer& gt)
                                    static_cast<uint32_t>(std::max(1, grassLod1BladeCount)));
         emitter->SetWindIntensity(std::max(0.0f, grassWindIntensity));
         emitter->SetWindAmplitude(std::max(0.0f, grassWindAmplitude));
+        emitter->SetLod0Sdof(grassLod0SdofNaturalFreq, grassLod0SdofDampingRatio);
+        emitter->SetLodBladeSize(grassLod0BladeWidthScale, grassLod0BladeHeightScale,
+                                 grassLod1BladeWidthScale, grassLod1BladeHeightScale);
+        emitter->SetWindGradient(static_cast<uint32_t>(std::clamp(grassWindOriginCount, 1, 4)),
+                                 std::max(0.1f, grassWindMapFalloff),
+                                 grassWindOrigins.data(), grassWindDirections.data());
+        emitter->SetFieldInfluenceScale(grassFieldInfluenceScale);
+        emitter->SetDebugNearestOriginTint(debugNearestOriginTint);
         emitter->SetWindDirection(grassWindDirection);
     }
 
@@ -282,7 +292,7 @@ void HybridParticleApp::PopulateForwardPathCommands(const std::shared_ptr<GComma
         {
             grassEmitter->SetWorldConstantsBuffer(currentFrameResource->PrimePassConstantUploadBuffer.get());
             grassEmitter->SetFrustumCullingData(mainPassCB.ViewProj, mainPassCB.EyePosW,
-                                                grassCullMaxDistance, grassLod0Distance,
+                                                grassCullMaxDistance, grassLod0Distance, grassLod1Distance,
                                                 static_cast<uint32_t>(grassLod0BaseSegments),
                                                 grassWindTessellationScale);
         }
@@ -1012,10 +1022,10 @@ void HybridParticleApp::CreateGO()
     //gameObjects.push_back(std::move(grassField));
 
     auto grassField = std::make_unique<GameObject>("Grass Field");
-    grassField->GetTransform()->SetPosition(Vector3(0,60,0));
+    grassField->GetTransform()->SetPosition(Vector3(0,0,0));
     grassField->SetScale(5.5f);
     auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice,
-                                                                   static_cast<uint32_t>(grassBladeCount), 200.0f,
+                                                                   static_cast<uint32_t>(grassBladeCount), grassWorldSize,
                                                                    static_cast<uint32_t>(grassLod0BladeCount),
                                                                    static_cast<uint32_t>(grassLod1BladeCount));
     grassField->AddComponent(grassEmitter);
@@ -1675,13 +1685,56 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         }
         ImGui::SliderFloat("Wind intensity", &grassWindIntensity, 0.0f, 200.0f, "%.2f");
         ImGui::SliderFloat("Wind amplitude", &grassWindAmplitude, 0.0f, 200.0f, "%.2f");
+        ImGui::SliderInt("Wind origins count", &grassWindOriginCount, 1, 4);
+        ImGui::SliderFloat("Wind map falloff", &grassWindMapFalloff, 0.1f, 6.0f, "%.2f");
+        ImGui::SliderFloat("Field influence scale", &grassFieldInfluenceScale, 0.0f, 6.0f, "%.2f");
+        ImGui::Checkbox("Show wind field debug", &showWindFieldDebug);
+        ImGui::Checkbox("Debug nearest-origin tint", &debugNearestOriginTint);
+        ImGui::SliderInt("Wind field grid", &windFieldGridResolution, 4, 40);
+        for (int i = 0; i < grassWindOriginCount; ++i)
+        {
+            float origin[3] = { grassWindOrigins[i].x, grassWindOrigins[i].y, grassWindOrigins[i].z };
+            float radius = grassWindOrigins[i].w;
+            float dir[2] = { grassWindDirections[i].x, grassWindDirections[i].y };
+            float strength = grassWindDirections[i].w;
+
+            std::string originLabel = "Wind origin " + std::to_string(i) + " (XYZ)";
+            std::string radiusLabel = "Wind radius " + std::to_string(i);
+            std::string dirLabel = "Wind dir " + std::to_string(i) + " (XZ)";
+            std::string strengthLabel = "Wind strength " + std::to_string(i);
+            ImGui::InputFloat3(originLabel.c_str(), origin, "%.1f");
+            ImGui::SliderFloat(radiusLabel.c_str(), &radius, 50.0f, 5000.0f, "%.0f");
+            ImGui::InputFloat2(dirLabel.c_str(), dir, "%.2f");
+            ImGui::SliderFloat(strengthLabel.c_str(), &strength, 0.0f, 4.0f, "%.2f");
+
+            grassWindOrigins[i] = Vector4(origin[0], origin[1], origin[2], radius);
+            Vector2 d(dir[0], dir[1]);
+            if (d.LengthSquared() < 1e-6f) d = Vector2(1.0f, 0.0f);
+            else d.Normalize();
+            grassWindDirections[i] = Vector4(d.x, d.y, 0.0f, strength);
+        }
+        ImGui::SliderFloat("LOD0 SDOF natural freq", &grassLod0SdofNaturalFreq, 0.1f, 12.0f, "%.2f");
+        ImGui::SliderFloat("LOD0 SDOF damping", &grassLod0SdofDampingRatio, 0.01f, 2.0f, "%.2f");
+        ImGui::SliderFloat("LOD0 blade width", &grassLod0BladeWidthScale, 0.1f, 4.0f, "%.2f");
+        ImGui::SliderFloat("LOD0 blade height", &grassLod0BladeHeightScale, 0.1f, 4.0f, "%.2f");
+        ImGui::SliderFloat("LOD1 blade width", &grassLod1BladeWidthScale, 0.1f, 4.0f, "%.2f");
+        ImGui::SliderFloat("LOD1 blade height", &grassLod1BladeHeightScale, 0.1f, 4.0f, "%.2f");
         ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
         ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
+        ImGui::SliderFloat("LOD1 distance", &grassLod1Distance, 50.0f, 3000.0f, "%.0f");
         ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 6);
         ImGui::SliderFloat("Wind tessellation scale", &grassWindTessellationScale, 0.0f, 8.0f, "%.2f");
         if (grassLod0Distance > grassCullMaxDistance)
         {
             grassLod0Distance = grassCullMaxDistance;
+        }
+        if (grassLod1Distance < grassLod0Distance)
+        {
+            grassLod1Distance = grassLod0Distance;
+        }
+        if (grassLod1Distance > grassCullMaxDistance)
+        {
+            grassLod1Distance = grassCullMaxDistance;
         }
         ImGui::Separator();
         ImGuiGpuSection("Prime adapter", "Scene render + window present",
@@ -1693,6 +1746,106 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
                         secondGPURenderingTime, secondGPUComputingTime);
     }
     ImGui::End();
+
+    if (showWindFieldDebug && camera != nullptr)
+    {
+        const Matrix viewProj = camera->GetViewMatrix() * camera->GetProjectionMatrix();
+        const ImVec2 screenSize = ImGui::GetIO().DisplaySize;
+        const int grid = std::clamp(windFieldGridResolution, 4, 40);
+        const int activeOrigins = std::clamp(grassWindOriginCount, 1, 4);
+        float fieldCenterX = 0.0f;
+        float fieldCenterZ = 0.0f;
+        float fieldHalf = std::max(200.0f, grassWorldSize * 0.5f);
+        if (!crossGrassEmitters.empty() && crossGrassEmitters[0] && crossGrassEmitters[0]->gameObject)
+        {
+            const auto t = crossGrassEmitters[0]->gameObject->GetTransform();
+            if (t)
+            {
+                const Vector3 p = t->GetWorldPosition();
+                const Vector3 s = t->GetScale();
+                fieldCenterX = p.x;
+                fieldCenterZ = p.z;
+                fieldHalf = std::max(fieldHalf, grassWorldSize * 0.5f * std::max(std::abs(s.x), std::abs(s.z)));
+            }
+        }
+
+        auto sampleWindGradient = [&](const Vector3& worldPos) -> Vector2
+        {
+            Vector2 accum = Vector2::Zero;
+            float wsum = 0.0f;
+            for (int i = 0; i < activeOrigins; ++i)
+            {
+                const Vector4 origin = grassWindOrigins[i];
+                const float radius = std::max(1.0f, origin.w);
+                Vector2 dir(grassWindDirections[i].x, grassWindDirections[i].y);
+                if (dir.LengthSquared() < 1e-6f)
+                    continue;
+                dir.Normalize();
+                const float strength = std::max(0.0f, grassWindDirections[i].w);
+                const Vector2 toPoint(worldPos.x - origin.x, worldPos.z - origin.z);
+                const float d = toPoint.Length();
+                const float t = std::clamp(1.0f - d / radius, 0.0f, 1.0f);
+                const float w = std::pow(t, std::max(0.1f, grassWindMapFalloff)) * strength;
+                accum += dir * w;
+                wsum += w;
+            }
+            if (wsum > 1e-6f)
+            {
+                const float mag = std::clamp(wsum, 0.0f, 1.0f);
+                accum.Normalize();
+                return accum * mag;
+            }
+            Vector2 fallback = grassWindDirection;
+            if (fallback.LengthSquared() < 1e-6f) fallback = Vector2(1.0f, 0.0f);
+            else fallback.Normalize();
+            return fallback * 0.25f;
+        };
+
+        auto project = [&](const Vector3& p, ImVec2& out) -> bool
+        {
+            const Vector4 clip = Vector4::Transform(Vector4(p.x, p.y, p.z, 1.0f), viewProj);
+            if (clip.w <= 1e-4f)
+                return false;
+            const float invW = 1.0f / clip.w;
+            const float ndcX = clip.x * invW;
+            const float ndcY = clip.y * invW;
+            if (ndcX < -1.6f || ndcX > 1.6f || ndcY < -1.6f || ndcY > 1.6f)
+                return false;
+            out.x = (ndcX * 0.5f + 0.5f) * screenSize.x;
+            out.y = (1.0f - (ndcY * 0.5f + 0.5f)) * screenSize.y;
+            return true;
+        };
+
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        for (int gx = 0; gx < grid; ++gx)
+        {
+            for (int gz = 0; gz < grid; ++gz)
+            {
+                const float fx = (static_cast<float>(gx) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * fieldHalf;
+                const float fz = (static_cast<float>(gz) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * fieldHalf;
+                const Vector3 p0(fieldCenterX + fx, 4.0f, fieldCenterZ + fz);
+                const Vector2 w = sampleWindGradient(p0);
+                const Vector3 p1 = p0 + Vector3(w.x, 0.0f, w.y) * 60.0f;
+                ImVec2 s0, s1;
+                if (!project(p0, s0) || !project(p1, s1))
+                    continue;
+                const ImU32 col = IM_COL32(80, 220, 255, 200);
+                dl->AddLine(s0, s1, col, 1.5f);
+                const ImVec2 dir(s1.x - s0.x, s1.y - s0.y);
+                const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                if (len > 4.0f)
+                {
+                    const ImVec2 n(dir.x / len, dir.y / len);
+                    const ImVec2 l(-n.y, n.x);
+                    const ImVec2 tip = s1;
+                    const ImVec2 a(tip.x - n.x * 6.0f + l.x * 3.0f, tip.y - n.y * 6.0f + l.y * 3.0f);
+                    const ImVec2 b(tip.x - n.x * 6.0f - l.x * 3.0f, tip.y - n.y * 6.0f - l.y * 3.0f);
+                    dl->AddTriangleFilled(tip, a, b, col);
+                }
+            }
+        }
+        dl->AddText(ImVec2(20.0f, 20.0f), IM_COL32(80, 220, 255, 255), "Wind field debug: ON");
+    }
 
     ImGui::Render();
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList->GetGraphicsCommandList().Get());

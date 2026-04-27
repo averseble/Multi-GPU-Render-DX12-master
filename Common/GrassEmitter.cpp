@@ -4,6 +4,7 @@
 #include "MathHelper.h"
 #include "Transform.h"
 #include "GCommandList.h"
+#include <algorithm>
 
 GrassEmitter::GrassEmitter(std::shared_ptr<GDevice> dev, uint32_t grassCount, float worldSize,
                            uint32_t lod0BladeCount, uint32_t lod1BladeCount)
@@ -16,6 +17,12 @@ GrassEmitter::GrassEmitter(std::shared_ptr<GDevice> dev, uint32_t grassCount, fl
     emitterData.WindStrength = 0.5f;
     emitterData.WindIntensity = 1.0f;
     emitterData.WindAmplitude = 1.0f;
+    emitterData.Lod0BladeWidthScale = 1.0f;
+    emitterData.Lod0BladeHeightScale = 1.0f;
+    emitterData.Lod1BladeWidthScale = 1.0f;
+    emitterData.Lod1BladeHeightScale = 1.0f;
+    emitterData.Lod0SdofNaturalFreq = 2.5f;
+    emitterData.Lod0SdofDampingRatio = 0.35f;
     emitterData.Time = 0.0f;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
     emitterData.Lod0BladeCount = std::max(1u, lod0BladeCount);
@@ -353,6 +360,35 @@ void GrassEmitter::SetWindDirection(const Vector2& direction)
         d.Normalize();
     }
     emitterData.WindDirection = d;
+}
+
+void GrassEmitter::SetWindGradient(uint32_t originCount, float falloff,
+                                   const Vector4* originData, const Vector4* directionData)
+{
+    emitterData.WindOriginCount = std::min(originCount, GrassEmitterData::MaxWindOrigins);
+    emitterData.WindMapFalloff = std::max(0.1f, falloff);
+    for (uint32_t i = 0; i < GrassEmitterData::MaxWindOrigins; ++i)
+    {
+        if (originData)
+        {
+            emitterData.WindOriginData[i] = originData[i];
+            emitterData.WindOriginData[i].w = std::max(1.0f, emitterData.WindOriginData[i].w);
+        }
+        if (directionData)
+        {
+            Vector2 dir(directionData[i].x, directionData[i].y);
+            if (dir.LengthSquared() < 1e-6f)
+            {
+                dir = Vector2(1.0f, 0.0f);
+            }
+            else
+            {
+                dir.Normalize();
+            }
+            emitterData.WindDirectionData[i] = Vector4(
+                dir.x, dir.y, directionData[i].z, std::max(0.0f, directionData[i].w));
+        }
+    }
 }
 
 void GrassEmitter::Update()

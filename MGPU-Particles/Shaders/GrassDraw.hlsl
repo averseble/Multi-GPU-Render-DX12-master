@@ -45,12 +45,117 @@ cbuffer GrassEmitterData : register(b2)
     float WindStrength;
     float WindIntensity;
     float WindAmplitude;
+    float Lod0BladeWidthScale;
+    float Lod0BladeHeightScale;
+    float Lod1BladeWidthScale;
+    float Lod1BladeHeightScale;
+    float Lod0SdofNaturalFreq;
+    float Lod0SdofDampingRatio;
+    float Lod0DistanceThreshold;
+    float Lod1DistanceThreshold;
     uint AtlasTextureCount;
     uint GpuStressIterations;
     uint Lod0BladeCount;
     uint Lod1BladeCount;
     float2 WindDirection;
+    uint WindOriginCount;
+    float WindMapFalloff;
+    float FieldInfluenceScale;
+    float DebugNearestOriginTint;
     float2 Padding2;
+    float4 WindOriginData[4];
+    float4 WindDirectionData[4];
+}
+
+float2 SampleWindGradient(float3 worldPos, float2 fallbackDir)
+{
+    float2 accum = float2(0.0f, 0.0f);
+    float wsum = 0.0f;
+    uint count = min(WindOriginCount, 4u);
+    [loop]
+    for (uint i = 0u; i < count; ++i)
+    {
+        float3 origin = WindOriginData[i].xyz;
+        float radius = max(1.0f, WindOriginData[i].w);
+        float2 dir = WindDirectionData[i].xy;
+        float strength = max(0.0f, WindDirectionData[i].w);
+        float d = distance(worldPos.xz, origin.xz);
+        float t = saturate(1.0f - d / radius);
+        float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
+        if (dot(dir, dir) > 1e-6f && w > 1e-6f)
+        {
+            accum += normalize(dir) * w;
+            wsum += w;
+        }
+    }
+    if (wsum > 1e-6f)
+    {
+        float2 dir = normalize(accum);
+        float mag = saturate(wsum / max(1.0f, float(count)));
+        return dir * mag;
+    }
+    float2 d0 = fallbackDir;
+    if (dot(d0, d0) < 1e-6f) d0 = float2(1.0f, 0.0f);
+    return normalize(d0);
+}
+
+float2 SampleNearestWindVector(float3 worldPos, float2 fallbackDir)
+{
+    uint count = min(WindOriginCount, 4u);
+    float bestMetric = 1e30f;
+    float2 bestVec = float2(0.0f, 0.0f);
+    [loop]
+    for (uint i = 0u; i < count; ++i)
+    {
+        float3 origin = WindOriginData[i].xyz;
+        float radius = max(1.0f, WindOriginData[i].w);
+        float2 dir = WindDirectionData[i].xy;
+        float strength = max(0.0f, WindDirectionData[i].w);
+        if (dot(dir, dir) < 1e-6f || strength <= 1e-6f)
+            continue;
+        float d = distance(worldPos.xz, origin.xz);
+        float nd = d / radius;
+        // Choose nearest by physical distance to avoid large-radius bias
+        // forcing one origin to dominate the entire field direction.
+        if (d < bestMetric)
+        {
+            bestMetric = d;
+            float t = saturate(1.0f - nd);
+            float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
+            bestVec = normalize(dir) * w;
+        }
+    }
+    if (dot(bestVec, bestVec) > 1e-6f)
+    {
+        return bestVec;
+    }
+    return SampleWindGradient(worldPos, fallbackDir);
+}
+
+uint FindNearestWindOriginIndex(float3 worldPos)
+{
+    uint count = min(WindOriginCount, 4u);
+    float bestD = 1e30f;
+    uint bestI = 0u;
+    [loop]
+    for (uint i = 0u; i < count; ++i)
+    {
+        float d = distance(worldPos.xz, WindOriginData[i].xz);
+        if (d < bestD)
+        {
+            bestD = d;
+            bestI = i;
+        }
+    }
+    return bestI;
+}
+
+float3 OriginDebugColor(uint idx)
+{
+    if (idx == 0u) return float3(1.0, 0.2, 0.2); // red
+    if (idx == 1u) return float3(0.2, 1.0, 0.2); // green
+    if (idx == 2u) return float3(0.2, 0.4, 1.0); // blue
+    return float3(1.0, 1.0, 0.2);                // yellow
 }
 
 struct GrassData
@@ -136,7 +241,8 @@ struct GSOutput
     float BladeHeight01 : TEXCOORD2;
 };
 
-GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFactor, float useTexture, float bladeHeight01)
+GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFactor, float useTexture,
+                          float bladeHeight01, float bladeWidthScale, float bladeHeightScale)
 {
     GSOutput output;
 
@@ -146,8 +252,8 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     float objectScaleX = max(length(worldAxisX), 1e-3f);
     float objectScaleY = max(length(worldAxisY), 1e-3f);
 
-    float width = QuadSize * input.Scale * 0.5f * objectScaleX;
-    float height = QuadSize * input.Scale * objectScaleY;
+    float width = QuadSize * input.Scale * 0.5f * objectScaleX * max(bladeWidthScale, 0.05f);
+    float height = QuadSize * input.Scale * objectScaleY * max(bladeHeightScale, 0.05f);
 
 #if GRASS_DEBUG_FIXED_WORLD
     const float3 debugCenterW = float3(0.0f, 0.0f, 0.0f);
@@ -172,20 +278,28 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     float3 rotatedRight = right * cosR + forward * sinR;
 
     float sideOffset = offset.x * width;
-    float verticalOffset = offset.y * height;
-    float bendFactor = saturate((offset.y + 1.0f) * 0.5f);
+    float verticalOffset = saturate(offset.y) * height;
+    float bendFactor = saturate(offset.y);
     float bendProfile = bendFactor * bendFactor;
-    float2 windDir = WindDirection;
-    if (dot(windDir, windDir) < 1e-6f) windDir = float2(1.0f, 0.0f);
-    windDir = normalize(windDir);
-    float2 bladeRightXZ = normalize(float2(rotatedRight.x, rotatedRight.z));
-    float dirAlign = dot(windDir, bladeRightXZ);
-    float directionalBend = (0.7f + 0.3f * windFactor) * WindStrength * WindAmplitude * width * 1.6f * bendProfile;
-    sideOffset += directionalBend * dirAlign;
+    float2 windVec = SampleWindGradient(input.WorldPos, WindDirection);
+    if (useTexture < 0.5f)
+    {
+        // LOD0: use nearest field vector for clear directional lay.
+        windVec = SampleNearestWindVector(input.WorldPos, WindDirection);
+    }
+    float2 windDir = (dot(windVec, windVec) > 1e-6f) ? normalize(windVec) : float2(1.0f, 0.0f);
+    float windFieldStrength = clamp(length(windVec) * FieldInfluenceScale, 0.0f, 8.0f);
+    float ampScale = (useTexture > 0.5f) ? WindAmplitude : 1.0f;
+    // Keep a preferred wind direction but allow meaningful oscillation around it.
+    float directionalResponse = windFactor;
+    float staticLay = 0.9f * windFieldStrength; // strong steady lay toward local field
+    float directionalBend = (staticLay + directionalResponse) * WindStrength * ampScale * windFieldStrength * width * 1.6f * bendProfile;
+    // LOD0/LOD1 bend direction follows the vector field directly in world XZ.
+    float3 worldWindOffset = float3(windDir.x, 0.0f, windDir.y) * directionalBend;
     // Natural blade arc: as wind bends the tip, it also slightly droops down.
     verticalOffset -= abs(directionalBend) * 0.35f * bendProfile;
 
-    float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset;
+    float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset + worldWindOffset;
 #endif
     
     output.WorldPos = worldPos;
@@ -206,11 +320,32 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     
     // Эффект ветра
     float windPhase = grass.WorldPos.x * 0.5f + grass.WorldPos.z * 0.3f + grass.WindOffset;
-    float windFactor = sin(Time * 2.0f * WindIntensity + windPhase);
+    float forceOmega = max(0.01f, 2.0f * WindIntensity);
+    float forceSignal = sin(Time * forceOmega + windPhase);
     
     // Single-GPU path: approximate LOD0 by segmenting close blades.
     float distToEye = distance(EyePosW, grass.WorldPos);
-    bool useLod0 = distToEye <= 300.0f;
+    bool useLod0 = distToEye <= Lod0DistanceThreshold;
+    bool useLod1 = !useLod0 && distToEye <= Lod1DistanceThreshold;
+    bool useLod2 = !useLod0 && !useLod1;
+    float windFactor = forceSignal;
+    if (useLod0)
+    {
+        // Harmonic response of SDOF oscillator to sinusoidal forcing.
+        float wn = max(0.05f, Lod0SdofNaturalFreq);
+        float zeta = max(0.01f, Lod0SdofDampingRatio);
+        // LOD0 is decoupled from generic wind intensity.
+        forceOmega = 2.0f;
+        float num = wn * wn;
+        float denA = (wn * wn - forceOmega * forceOmega);
+        float denB = (2.0f * zeta * wn * forceOmega);
+        float gain = num / sqrt(max(1e-6f, denA * denA + denB * denB));
+        float phaseLag = atan2(denB, denA);
+        windFactor = sin(Time * forceOmega + windPhase - phaseLag) * gain;
+        // LOD0 uses SDOF response amplitude directly.
+    }
+    float bladeWidthScale = useLod0 ? Lod0BladeWidthScale : Lod1BladeWidthScale;
+    float bladeHeightScale = useLod0 ? Lod0BladeHeightScale : Lod1BladeHeightScale;
     if (useLod0)
     {
         // Near-field: render several thin separated strips per instance
@@ -233,8 +368,8 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
             {
                 float t0 = float(seg) / float(segments);
                 float t1 = float(seg + 1u) / float(segments);
-                float y0 = lerp(-1.0f, 1.0f, t0);
-                float y1 = lerp(-1.0f, 1.0f, t1);
+                float y0 = t0;
+                float y1 = t1;
 
                 float taper0 = lerp(1.0f, 0.12f, t0);
                 float taper1 = lerp(1.0f, 0.12f, t1);
@@ -244,15 +379,15 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
                 float xR1 = bladeCenter + bladeHalfWidth * taper1;
                 float windBlade = windFactor + bladePhaseOffset;
 
-                triStream.Append(CreateQuadVertex(grass, float2(xL0, y0), float2(0.0f, 1.0f - t0), windBlade, useTexture, t0));
-                triStream.Append(CreateQuadVertex(grass, float2(xL1, y1), float2(0.0f, 1.0f - t1), windBlade, useTexture, t1));
-                triStream.Append(CreateQuadVertex(grass, float2(xR0, y0), float2(1.0f, 1.0f - t0), windBlade, useTexture, t0));
-                triStream.Append(CreateQuadVertex(grass, float2(xR1, y1), float2(1.0f, 1.0f - t1), windBlade, useTexture, t1));
+                triStream.Append(CreateQuadVertex(grass, float2(xL0, y0), float2(0.0f, 1.0f - t0), windBlade, useTexture, t0, bladeWidthScale, bladeHeightScale));
+                triStream.Append(CreateQuadVertex(grass, float2(xL1, y1), float2(0.0f, 1.0f - t1), windBlade, useTexture, t1, bladeWidthScale, bladeHeightScale));
+                triStream.Append(CreateQuadVertex(grass, float2(xR0, y0), float2(1.0f, 1.0f - t0), windBlade, useTexture, t0, bladeWidthScale, bladeHeightScale));
+                triStream.Append(CreateQuadVertex(grass, float2(xR1, y1), float2(1.0f, 1.0f - t1), windBlade, useTexture, t1, bladeWidthScale, bladeHeightScale));
                 triStream.RestartStrip();
             }
         }
     }
-    else
+    else if (useLod1)
     {
         const uint bladeCount = clamp(Lod1BladeCount, 1u, 4u);
         const float useTexture = 1.0f;
@@ -266,12 +401,23 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
             float xL = bladeCenter - bladeHalfWidth;
             float xR = bladeCenter + bladeHalfWidth;
 
-            triStream.Append(CreateQuadVertex(grass, float2(xL, -1.0f), float2(0.0f, 1.0f), windFactor, useTexture, 0.0f));
-            triStream.Append(CreateQuadVertex(grass, float2(xL, 1.0f), float2(0.0f, 0.0f), windFactor, useTexture, 1.0f));
-            triStream.Append(CreateQuadVertex(grass, float2(xR, -1.0f), float2(1.0f, 1.0f), windFactor, useTexture, 0.0f));
-            triStream.Append(CreateQuadVertex(grass, float2(xR, 1.0f), float2(1.0f, 0.0f), windFactor, useTexture, 1.0f));
+            triStream.Append(CreateQuadVertex(grass, float2(xL, 0.0f), float2(0.0f, 1.0f), windFactor, useTexture, 0.0f, bladeWidthScale, bladeHeightScale));
+            triStream.Append(CreateQuadVertex(grass, float2(xL, 1.0f), float2(0.0f, 0.0f), windFactor, useTexture, 1.0f, bladeWidthScale, bladeHeightScale));
+            triStream.Append(CreateQuadVertex(grass, float2(xR, 0.0f), float2(1.0f, 1.0f), windFactor, useTexture, 0.0f, bladeWidthScale, bladeHeightScale));
+            triStream.Append(CreateQuadVertex(grass, float2(xR, 1.0f), float2(1.0f, 0.0f), windFactor, useTexture, 1.0f, bladeWidthScale, bladeHeightScale));
             triStream.RestartStrip();
         }
+    }
+    else
+    {
+        // LOD2: maximum optimization, no wind, single card.
+        const float useTexture = 1.0f;
+        const float w = 0.10f;
+        triStream.Append(CreateQuadVertex(grass, float2(-w, 0.0f), float2(0.0f, 1.0f), 0.0f, useTexture, 0.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
+        triStream.Append(CreateQuadVertex(grass, float2(-w, 1.0f), float2(0.0f, 0.0f), 0.0f, useTexture, 1.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
+        triStream.Append(CreateQuadVertex(grass, float2(w, 0.0f), float2(1.0f, 1.0f), 0.0f, useTexture, 0.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
+        triStream.Append(CreateQuadVertex(grass, float2(w, 1.0f), float2(1.0f, 0.0f), 0.0f, useTexture, 1.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
+        triStream.RestartStrip();
     }
 }
 
@@ -309,8 +455,14 @@ float4 PS(PSInput input) : SV_Target
     
     float3 ambient = float3(0.2f, 0.2f, 0.2f);
     float3 lighting = ambient + diff;
-    
-    return float4(color.rgb * lighting, color.a);
+    float3 outRgb = color.rgb * lighting;
+    if (DebugNearestOriginTint > 0.5f)
+    {
+        const uint i = FindNearestWindOriginIndex(input.WorldPos);
+        const float3 tint = OriginDebugColor(i);
+        outRgb = lerp(outRgb, tint, 0.65f);
+    }
+    return float4(outRgb, color.a);
 }
 
 struct ExpandedVSOut
@@ -339,13 +491,6 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
     }
     GrassRenderVertex v = ExpandedGrassVertices[vertexID];
     float3 pos = v.Position;
-    // Multi-GPU path: add frame-time wind deformation in VS so animation
-    // remains visible even if expanded vertices are not re-generated every frame.
-    // Use b1 (WorldConstants) only; expanded draw root signature does not bind b2.
-    float bladeHeight01 = saturate(1.0f - v.TexCoord.y);
-    float phase = pos.x * 0.5f + pos.z * 0.3f + TotalTime * 2.0f;
-    float bend = (0.7f + 0.3f * sin(phase)) * bladeHeight01;
-    pos.x += 0.8f * bend;
     float4 posW = mul(float4(pos, 1.0f), World);
     o.PositionH = mul(posW, ViewProj);
     o.TexCoord = v.TexCoord;

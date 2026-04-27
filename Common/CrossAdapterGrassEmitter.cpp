@@ -18,6 +18,12 @@ CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> prim
     emitterData.WindStrength = 0.5f;
     emitterData.WindIntensity = 1.0f;
     emitterData.WindAmplitude = 1.0f;
+    emitterData.Lod0BladeWidthScale = 1.0f;
+    emitterData.Lod0BladeHeightScale = 1.0f;
+    emitterData.Lod1BladeWidthScale = 1.0f;
+    emitterData.Lod1BladeHeightScale = 1.0f;
+    emitterData.Lod0SdofNaturalFreq = 2.5f;
+    emitterData.Lod0SdofDampingRatio = 0.35f;
     emitterData.Time = 0.0f;
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(grassCount)));
     emitterData.Lod0BladeCount = std::max(1u, std::min(lod0BladeCount, kMaxBladeCount));
@@ -465,6 +471,83 @@ void CrossAdapterGrassEmitter::SetWindAmplitude(float amplitude)
     }
 }
 
+void CrossAdapterGrassEmitter::SetLodBladeSize(float lod0WidthScale, float lod0HeightScale,
+                                               float lod1WidthScale, float lod1HeightScale)
+{
+    emitterData.Lod0BladeWidthScale = std::max(0.05f, lod0WidthScale);
+    emitterData.Lod0BladeHeightScale = std::max(0.05f, lod0HeightScale);
+    emitterData.Lod1BladeWidthScale = std::max(0.05f, lod1WidthScale);
+    emitterData.Lod1BladeHeightScale = std::max(0.05f, lod1HeightScale);
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetLodBladeSize(
+            emitterData.Lod0BladeWidthScale, emitterData.Lod0BladeHeightScale,
+            emitterData.Lod1BladeWidthScale, emitterData.Lod1BladeHeightScale);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetLod0Sdof(float naturalFreq, float dampingRatio)
+{
+    emitterData.Lod0SdofNaturalFreq = std::max(0.05f, naturalFreq);
+    emitterData.Lod0SdofDampingRatio = std::max(0.01f, dampingRatio);
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetLod0Sdof(emitterData.Lod0SdofNaturalFreq, emitterData.Lod0SdofDampingRatio);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetWindGradient(uint32_t originCount, float falloff,
+                                               const Vector4* originData, const Vector4* directionData)
+{
+    emitterData.WindOriginCount = std::min(originCount, GrassEmitterData::MaxWindOrigins);
+    emitterData.WindMapFalloff = std::max(0.1f, falloff);
+    for (uint32_t i = 0; i < GrassEmitterData::MaxWindOrigins; ++i)
+    {
+        if (originData)
+        {
+            emitterData.WindOriginData[i] = originData[i];
+            emitterData.WindOriginData[i].w = std::max(1.0f, emitterData.WindOriginData[i].w);
+        }
+        if (directionData)
+        {
+            Vector2 dir(directionData[i].x, directionData[i].y);
+            if (dir.LengthSquared() < 1e-6f)
+            {
+                dir = Vector2(1.0f, 0.0f);
+            }
+            else
+            {
+                dir.Normalize();
+            }
+            emitterData.WindDirectionData[i] = Vector4(
+                dir.x, dir.y, directionData[i].z, std::max(0.0f, directionData[i].w));
+        }
+    }
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetWindGradient(emitterData.WindOriginCount, emitterData.WindMapFalloff,
+                                           emitterData.WindOriginData, emitterData.WindDirectionData);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetFieldInfluenceScale(float scale)
+{
+    emitterData.FieldInfluenceScale = std::max(0.0f, scale);
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetFieldInfluenceScale(emitterData.FieldInfluenceScale);
+    }
+}
+
+void CrossAdapterGrassEmitter::SetDebugNearestOriginTint(bool enabled)
+{
+    emitterData.DebugNearestOriginTint = enabled ? 1.0f : 0.0f;
+    if (primeGrassEmitter)
+    {
+        primeGrassEmitter->SetDebugNearestOriginTint(enabled);
+    }
+}
+
 void CrossAdapterGrassEmitter::SetWindDirection(const Vector2& direction)
 {
     Vector2 d = direction;
@@ -548,13 +631,17 @@ void CrossAdapterGrassEmitter::SetWorldConstantsBuffer(const GBuffer* worldConst
 }
 
 void CrossAdapterGrassEmitter::SetFrustumCullingData(const Matrix& viewProj, const Vector3& eyePos, const float maxDistance,
-                                                     const float lod0Distance, const uint32_t lod0BaseSegments,
+                                                     const float lod0Distance, const float lod1Distance,
+                                                     const uint32_t lod0BaseSegments,
                                                      const float windTessellationScale)
 {
     cullData.ViewProj = viewProj;
     cullData.EyePos = eyePos;
     cullData.MaxDistance = maxDistance;
     cullData.Lod0Distance = lod0Distance;
+    cullData.Lod1Distance = std::max(lod0Distance, lod1Distance);
     cullData.Lod0BaseSegments = std::min(lod0BaseSegments, kMaxLod0Segments);
     cullData.WindTessellationScale = windTessellationScale;
+    emitterData.Lod0DistanceThreshold = lod0Distance;
+    emitterData.Lod1DistanceThreshold = cullData.Lod1Distance;
 }
