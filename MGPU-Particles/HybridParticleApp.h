@@ -17,6 +17,9 @@
 #include "Light.h"
 #include <d3d12.h>
 #include <array>
+#include <string>
+#include <limits>
+#include <vector>
 
 struct ImGui_ImplDX12_InitInfo;
 
@@ -30,6 +33,8 @@ public:
     bool Initialize() override;;
 
     int Run() override;
+    void EnablePerformanceTestMode(int warmupSeconds = 5, int sampleSeconds = 20);
+    void EnablePerformanceSweepMode(int warmupSeconds = 5, int sampleSeconds = 15);
 
 protected:
     void Update(const GameTimer& gt) override;
@@ -61,6 +66,8 @@ protected:
     void CreateGO();
     void CalculateFrameStats() override;
     void LogWriting();
+    void WritePerformanceTestResults();
+    void WritePerformanceSweepResults();
     void UpdateMaterials();
     void UpdateShadowTransform(const GameTimer& gt);
     void UpdateShadowPassCB(const GameTimer& gt);
@@ -100,6 +107,39 @@ protected:
 
 
     bool IsStop = false;
+    bool performanceTestMode = false;
+    bool performanceSweepMode = false;
+    int perfWarmupSeconds = 5;
+    int perfSampleSeconds = 20;
+    int perfCurrentStage = 0; // 0 = single GPU, 1 = multi GPU
+    double perfStageStartTime = -1.0;
+    bool perfStageInitialized = false;
+    std::wstring perfResultPath;
+
+    struct PerfAggregate
+    {
+        int samples = 0;
+        double fpsSum = 0.0;
+        double primeRenderSum = 0.0;
+        double secondRenderSum = 0.0;
+        double primeComputeSum = 0.0;
+        double secondComputeSum = 0.0;
+        double minFps = std::numeric_limits<double>::max();
+        double maxFps = std::numeric_limits<double>::lowest();
+    };
+    std::array<PerfAggregate, 2> perfAggregates{};
+    struct PerfScenario
+    {
+        std::wstring name;
+        int grassCount = 5000;
+        float lod0Distance = 350.0f;
+        float lod1Distance = 1000.0f;
+        int lod0BladeCount = 3;
+        int lod1BladeCount = 1;
+        float fieldInfluenceScale = 1.0f;
+    };
+    std::vector<PerfScenario> perfScenarios{};
+    std::vector<std::array<PerfAggregate, 2>> perfScenarioAggregates{};
 
     const int StatisticStepSecondsCount = 120;
 
@@ -164,6 +204,7 @@ protected:
     bool secondAdapterDescValid = false;
 
     bool imguiFontDescriptorInUse = false;
+    std::string imguiIniFilePath;
     float grassCullMaxDistance = 1800.0f;
     float grassLod0Distance = 350.0f;
     float grassLod1Distance = 1000.0f;

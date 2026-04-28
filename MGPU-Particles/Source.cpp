@@ -1,4 +1,5 @@
 #include "HybridParticleApp.h"
+#include <cstring>
 using namespace Common;
 
 int WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -12,6 +13,14 @@ int WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE prevInstance,
     try
     {
         HybridParticleApp theApp(hInstance);
+        if (cmdLine && strstr(cmdLine, "--perf-sweep") != nullptr)
+        {
+            theApp.EnablePerformanceSweepMode(4, 12);
+        }
+        else if (cmdLine && strstr(cmdLine, "--perf-test") != nullptr)
+        {
+            theApp.EnablePerformanceTestMode(5, 20);
+        }
         if (!theApp.Initialize())
             return 0;
 

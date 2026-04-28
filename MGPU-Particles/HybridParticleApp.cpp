@@ -6,6 +6,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <locale>
 #include <string>
 #include <thread>
 #include "CameraController.h"
@@ -99,6 +101,45 @@ HybridParticleApp::HybridParticleApp(const HINSTANCE hInstance): D3DApp(hInstanc
 HybridParticleApp::~HybridParticleApp()
 {
     ShutdownImGui();
+}
+
+void HybridParticleApp::EnablePerformanceTestMode(int warmupSeconds, int sampleSeconds)
+{
+    performanceTestMode = true;
+    performanceSweepMode = false;
+    perfWarmupSeconds = std::max(1, warmupSeconds);
+    perfSampleSeconds = std::max(3, sampleSeconds);
+    perfCurrentStage = 0;
+    perfStageStartTime = -1.0;
+    perfStageInitialized = false;
+    perfAggregates = {};
+    perfScenarios.clear();
+    perfScenarioAggregates.clear();
+    perfResultPath.clear();
+    fpsLimitEnabled = false;
+}
+
+void HybridParticleApp::EnablePerformanceSweepMode(int warmupSeconds, int sampleSeconds)
+{
+    performanceTestMode = true;
+    performanceSweepMode = true;
+    perfWarmupSeconds = std::max(1, warmupSeconds);
+    perfSampleSeconds = std::max(3, sampleSeconds);
+    perfCurrentStage = 0;
+    perfStageStartTime = -1.0;
+    perfStageInitialized = false;
+    perfAggregates = {};
+    perfResultPath.clear();
+    fpsLimitEnabled = false;
+
+    perfScenarios = {
+        {L"baseline_mixed_lod", 5000, 350.0f, 1000.0f, 3, 1, 1.0f},
+        {L"lod0_heavy", 5000, 1800.0f, 1800.0f, 4, 1, 1.25f},
+        {L"lod1_favoring", 5000, 120.0f, 1700.0f, 2, 1, 1.0f},
+        {L"dense_mixed", 12000, 350.0f, 1000.0f, 3, 1, 1.0f},
+        {L"ultra_dense_lod0_heavy", 20000, 1800.0f, 1800.0f, 4, 1, 1.5f}
+    };
+    perfScenarioAggregates.assign(perfScenarios.size(), std::array<PerfAggregate, 2>{});
 }
 
 void HybridParticleApp::Update(const GameTimer& gt)
@@ -1108,6 +1149,128 @@ void HybridParticleApp::CreateGO()
 
 void HybridParticleApp::CalculateFrameStats()
 {
+    if (performanceTestMode)
+    {
+        frameCount++;
+        if ((timer.TotalTime() - timeElapsed) < 1.0f)
+        {
+            return;
+        }
+
+        const double fps = static_cast<double>(frameCount);
+        frameCount = 0;
+        timeElapsed += 1.0f;
+
+        if (!perfStageInitialized)
+        {
+            Flush();
+            // Disable VSync for benchmark mode to avoid refresh-rate capping.
+            MainWindow->SetVSync(false);
+            const int scenarioIndex = performanceSweepMode ? (perfCurrentStage / 2) : 0;
+            const int modeIndex = performanceSweepMode ? (perfCurrentStage % 2) : perfCurrentStage;
+            const bool multi = modeIndex == 1;
+
+            if (performanceSweepMode && scenarioIndex >= 0 && scenarioIndex < static_cast<int>(perfScenarios.size()))
+            {
+                const PerfScenario& s = perfScenarios[scenarioIndex];
+                grassBladeCount = std::max(1, s.grassCount);
+                pendingGrassBladeCount = grassBladeCount;
+                grassLod0Distance = std::clamp(s.lod0Distance, 25.0f, grassCullMaxDistance);
+                grassLod1Distance = std::clamp(std::max(s.lod1Distance, grassLod0Distance), grassLod0Distance, grassCullMaxDistance);
+                grassLod0BladeCount = std::clamp(s.lod0BladeCount, 1, 4);
+                grassLod1BladeCount = std::clamp(s.lod1BladeCount, 1, 4);
+                grassFieldInfluenceScale = std::max(0.0f, s.fieldInfluenceScale);
+            }
+
+            UseCrossAdapter = multi;
+            UseCrossSync = false;
+            for (auto* emitter : crossEmitter)
+            {
+                if (multi) emitter->EnableShared();
+                else emitter->DisableShared();
+            }
+            for (auto* emitter : crossGrassEmitters)
+            {
+                if (multi) emitter->EnableShared();
+                else emitter->DisableShared();
+            }
+            perfStageStartTime = timer.TotalTime();
+            perfStageInitialized = true;
+        }
+
+        const double stageElapsed = timer.TotalTime() - perfStageStartTime;
+        const double warmupEnd = static_cast<double>(perfWarmupSeconds);
+        const double stageEnd = warmupEnd + static_cast<double>(perfSampleSeconds);
+        if (stageElapsed >= warmupEnd && stageElapsed < stageEnd)
+        {
+            PerfAggregate* aggregate = nullptr;
+            if (performanceSweepMode)
+            {
+                const int scenarioIndex = perfCurrentStage / 2;
+                const int modeIndex = perfCurrentStage % 2;
+                if (scenarioIndex >= 0 && scenarioIndex < static_cast<int>(perfScenarioAggregates.size()))
+                {
+                    aggregate = &perfScenarioAggregates[scenarioIndex][modeIndex];
+                }
+            }
+            else
+            {
+                aggregate = &perfAggregates[perfCurrentStage];
+            }
+
+            if (!aggregate)
+            {
+                return;
+            }
+
+            PerfAggregate& a = *aggregate;
+            a.samples++;
+            a.fpsSum += fps;
+            a.primeRenderSum += static_cast<double>(primeGPURenderingTime);
+            a.secondRenderSum += static_cast<double>(secondGPURenderingTime);
+            a.primeComputeSum += static_cast<double>(primeGPUComputingTime);
+            a.secondComputeSum += static_cast<double>(secondGPUComputingTime);
+            a.minFps = std::min(a.minFps, fps);
+            a.maxFps = std::max(a.maxFps, fps);
+        }
+
+        if (stageElapsed >= stageEnd)
+        {
+            perfCurrentStage++;
+            perfStageInitialized = false;
+            const int stageCount = performanceSweepMode
+                                       ? static_cast<int>(perfScenarios.size() * 2)
+                                       : 2;
+            if (perfCurrentStage >= stageCount)
+            {
+                if (performanceSweepMode)
+                {
+                    WritePerformanceSweepResults();
+                }
+                else
+                {
+                    WritePerformanceTestResults();
+                }
+                IsStop = true;
+            }
+        }
+
+        const int modeIndex = performanceSweepMode ? (perfCurrentStage % 2) : perfCurrentStage;
+        std::wstring title = L"Perf test: ";
+        title += (modeIndex == 0 ? L"Single GPU" : L"Multi GPU");
+        if (performanceSweepMode)
+        {
+            const int scenarioIndex = perfCurrentStage / 2;
+            if (scenarioIndex >= 0 && scenarioIndex < static_cast<int>(perfScenarios.size()))
+            {
+                title += L" | " + perfScenarios[scenarioIndex].name;
+            }
+        }
+        title += L" (" + std::to_wstring(static_cast<int>(stageElapsed)) + L"s)";
+        MainWindow->SetWindowTitle(title);
+        return;
+    }
+
     static float minFps = std::numeric_limits<float>::max();
     static float minMspf = std::numeric_limits<float>::max();
     static float maxFps = std::numeric_limits<float>::min();
@@ -1236,6 +1399,88 @@ void HybridParticleApp::CalculateFrameStats()
 
         MainWindow->SetWindowTitle(title);
     }
+}
+
+void HybridParticleApp::WritePerformanceTestResults()
+{
+    const auto path = std::filesystem::current_path().wstring() + L"\\grass-perf-results.csv";
+    perfResultPath = path;
+    std::wofstream file(path, std::ios::out | std::ios::trunc);
+    if (!file.is_open())
+    {
+        logQueue.Push(L"\nFailed to open grass-perf-results.csv");
+        return;
+    }
+
+    // Keep numeric formatting locale-independent for stable spreadsheet import.
+    file.imbue(std::locale::classic());
+    // Use semicolon delimiter to avoid conflicts on locales using comma decimals.
+    file << L"mode;samples;avg_fps;min_fps;max_fps;avg_prime_render_ticks;avg_second_render_ticks;avg_prime_compute_ticks;avg_second_compute_ticks\n";
+    auto writeRow = [&](const wchar_t* mode, const PerfAggregate& a)
+    {
+        const double n = std::max(1, a.samples);
+        const double avgFps = a.fpsSum / n;
+        const double avgPrimeRender = a.primeRenderSum / n;
+        const double avgSecondRender = a.secondRenderSum / n;
+        const double avgPrimeCompute = a.primeComputeSum / n;
+        const double avgSecondCompute = a.secondComputeSum / n;
+        const double minFps = a.samples > 0 ? a.minFps : 0.0;
+        const double maxFps = a.samples > 0 ? a.maxFps : 0.0;
+        file << mode << L";" << a.samples << L";"
+             << std::fixed << std::setprecision(2)
+             << avgFps << L";" << minFps << L";" << maxFps << L";"
+             << avgPrimeRender << L";" << avgSecondRender << L";"
+             << avgPrimeCompute << L";" << avgSecondCompute << L"\n";
+    };
+    writeRow(L"single_gpu", perfAggregates[0]);
+    writeRow(L"multi_gpu", perfAggregates[1]);
+    file.close();
+    logQueue.Push(L"\nPerformance test saved: " + perfResultPath);
+}
+
+void HybridParticleApp::WritePerformanceSweepResults()
+{
+    const auto path = std::filesystem::current_path().wstring() + L"\\grass-perf-sweep-results.csv";
+    perfResultPath = path;
+    std::wofstream file(path, std::ios::out | std::ios::trunc);
+    if (!file.is_open())
+    {
+        logQueue.Push(L"\nFailed to open grass-perf-sweep-results.csv");
+        return;
+    }
+
+    file.imbue(std::locale::classic());
+    file << L"scenario;mode;grass_count;lod0_distance;lod1_distance;lod0_blades;lod1_blades;field_influence_scale;samples;avg_fps;min_fps;max_fps;avg_prime_render_ticks;avg_second_render_ticks;avg_prime_compute_ticks;avg_second_compute_ticks\n";
+
+    for (size_t i = 0; i < perfScenarios.size(); ++i)
+    {
+        const PerfScenario& s = perfScenarios[i];
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            const PerfAggregate& a = perfScenarioAggregates[i][mode];
+            const double n = std::max(1, a.samples);
+            const double avgFps = a.fpsSum / n;
+            const double avgPrimeRender = a.primeRenderSum / n;
+            const double avgSecondRender = a.secondRenderSum / n;
+            const double avgPrimeCompute = a.primeComputeSum / n;
+            const double avgSecondCompute = a.secondComputeSum / n;
+            const double minFps = a.samples > 0 ? a.minFps : 0.0;
+            const double maxFps = a.samples > 0 ? a.maxFps : 0.0;
+
+            file << s.name << L";" << (mode == 0 ? L"single_gpu" : L"multi_gpu") << L";"
+                 << s.grassCount << L";" << std::fixed << std::setprecision(1)
+                 << s.lod0Distance << L";" << s.lod1Distance << L";"
+                 << s.lod0BladeCount << L";" << s.lod1BladeCount << L";"
+                 << std::setprecision(2) << s.fieldInfluenceScale << L";"
+                 << a.samples << L";"
+                 << avgFps << L";" << minFps << L";" << maxFps << L";"
+                 << avgPrimeRender << L";" << avgSecondRender << L";"
+                 << avgPrimeCompute << L";" << avgSecondCompute << L"\n";
+        }
+    }
+
+    file.close();
+    logQueue.Push(L"\nPerformance sweep saved: " + perfResultPath);
 }
 
 void HybridParticleApp::LogWriting()
@@ -1577,6 +1822,10 @@ void HybridParticleApp::InitImGui()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    imguiIniFilePath = (std::filesystem::current_path() / "imgui-settings.ini").string();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = imguiIniFilePath.c_str();
+    ImGui::LoadIniSettingsFromDisk(io.IniFilename);
 
     imguiSrvDescriptors = primeDevice->AllocateDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                                                          globalCountFrameResources);
@@ -1609,6 +1858,10 @@ void HybridParticleApp::ShutdownImGui()
     if (!imguiInitialized)
         return;
 
+    if (!imguiIniFilePath.empty())
+    {
+        ImGui::SaveIniSettingsToDisk(imguiIniFilePath.c_str());
+    }
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
