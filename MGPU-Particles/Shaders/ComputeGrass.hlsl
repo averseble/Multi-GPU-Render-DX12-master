@@ -345,7 +345,8 @@ void CS_ExpandGrassToVertices(uint3 dispatchThreadID : SV_DispatchThreadID)
             rtR.y -= abs(bendWorld1) * 0.35f * bend1;
 
             uint dst = baseVertex + blade * (segments * 6u) + seg * 6u;
-            float useTexture = useLod0 ? 0.0f : 1.0f;
+            // 0: LOD0 gradient, 1: textured LOD1, 2: textured LOD2 (lower mip in PS).
+            float useTexture = useLod0 ? 0.0f : (useLod1 ? 1.0f : 2.0f);
 
             v.Padding1 = float2(useTexture, t0);
             v.Position = rbL; v.TexCoord = float2(0.0f, 1.0f - t0); ExpandedGrassBuffer[dst + 0u] = v;

@@ -411,7 +411,7 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     else
     {
         // LOD2: maximum optimization, no wind, single card.
-        const float useTexture = 1.0f;
+        const float useTexture = 2.0f; // Mark LOD2 so pixel shader can sample lower mip.
         const float w = 0.10f;
         triStream.Append(CreateQuadVertex(grass, float2(-w, 0.0f), float2(0.0f, 1.0f), 0.0f, useTexture, 0.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
         triStream.Append(CreateQuadVertex(grass, float2(-w, 1.0f), float2(0.0f, 0.0f), 0.0f, useTexture, 1.0f, Lod1BladeWidthScale, Lod1BladeHeightScale));
@@ -438,7 +438,11 @@ float4 PS(PSInput input) : SV_Target
     float4 color;
     if (input.UseTexture > 0.5f)
     {
-        color = GrassTexture.Sample(Sampler, input.TexCoord);
+        // LOD2 uses an explicit higher mip level for cheaper texture sampling.
+        if (input.UseTexture > 1.5f)
+            color = GrassTexture.SampleLevel(Sampler, input.TexCoord, 3.0f);
+        else
+            color = GrassTexture.Sample(Sampler, input.TexCoord);
         clip(color.a - 0.1f);
     }
     else
@@ -508,7 +512,10 @@ float4 PS_Expanded(ExpandedVSOut input) : SV_Target
     float4 color;
     if (input.UseTexture > 0.5f)
     {
-        color = GrassTexture.Sample(Sampler, input.TexCoord);
+        if (input.UseTexture > 1.5f)
+            color = GrassTexture.SampleLevel(Sampler, input.TexCoord, 3.0f);
+        else
+            color = GrassTexture.Sample(Sampler, input.TexCoord);
         clip(color.a - 0.1f);
     }
     else

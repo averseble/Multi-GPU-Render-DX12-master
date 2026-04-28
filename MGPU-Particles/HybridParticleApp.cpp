@@ -1063,8 +1063,9 @@ void HybridParticleApp::CreateGO()
     //gameObjects.push_back(std::move(grassField));
 
     auto grassField = std::make_unique<GameObject>("Grass Field");
-    grassField->GetTransform()->SetPosition(Vector3(0,0,0));
-    grassField->SetScale(5.5f);
+    grassFieldTransform = grassField->GetTransform();
+    grassFieldTransform->SetPosition(Vector3(0, 0, 0));
+    grassFieldTransform->SetScale(Vector3(15.0f, 11.0f, 15.0f));
     auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice,
                                                                    static_cast<uint32_t>(grassBladeCount), grassWorldSize,
                                                                    static_cast<uint32_t>(grassLod0BladeCount),
@@ -1075,9 +1076,9 @@ void HybridParticleApp::CreateGO()
     gameObjects.push_back(std::move(grassField));
 
      auto platform = std::make_unique<GameObject>();
-     platform->SetScale(Vector3(1 , 1, 0.8f));
-     platform->GetTransform()->SetEulerRotate(Vector3(0, 0, 0));
-     platform->GetTransform()->SetPosition(Vector3(680, 0, 100));
+     platformTransform = platform->GetTransform();
+     platformTransform->SetScale(Vector3(2.3, 2, 2.1f));
+     platformTransform->SetPosition(Vector3(1500, 0, 100));
      auto renderer = std::make_shared<ModelRenderer>(primeDevice, models[L"platform"]);
      platform->AddComponent(renderer);
      typedRenderer[static_cast<int>(RenderMode::Opaque)].push_back(renderer);
@@ -1912,6 +1913,46 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         ImGui::SeparatorText("Frame limiter");
         ImGui::Checkbox("Enable FPS limit", &fpsLimitEnabled);
         ImGui::SliderInt("FPS cap", &fpsLimitTarget, 20, 240);
+        ImGui::SeparatorText("Scene transforms");
+        if (grassFieldTransform)
+        {
+            Vector3 grassPos = grassFieldTransform->GetLocalPosition();
+            float grassPosUi[3] = { grassPos.x, grassPos.y, grassPos.z };
+            if (ImGui::InputFloat3("Grass field position", grassPosUi, "%.1f"))
+            {
+                grassFieldTransform->SetPosition(Vector3(grassPosUi[0], grassPosUi[1], grassPosUi[2]));
+            }
+
+            Vector3 grassScale = grassFieldTransform->GetScale();
+            float grassScaleUi[3] = { grassScale.x, grassScale.y, grassScale.z };
+            if (ImGui::InputFloat3("Grass field scale", grassScaleUi, "%.2f"))
+            {
+                grassScaleUi[0] = std::max(0.01f, grassScaleUi[0]);
+                grassScaleUi[1] = std::max(0.01f, grassScaleUi[1]);
+                grassScaleUi[2] = std::max(0.01f, grassScaleUi[2]);
+                grassFieldTransform->SetScale(Vector3(grassScaleUi[0], grassScaleUi[1], grassScaleUi[2]));
+            }
+        }
+
+        if (platformTransform)
+        {
+            Vector3 platformPos = platformTransform->GetLocalPosition();
+            float platformPosUi[3] = { platformPos.x, platformPos.y, platformPos.z };
+            if (ImGui::InputFloat3("Platform position", platformPosUi, "%.1f"))
+            {
+                platformTransform->SetPosition(Vector3(platformPosUi[0], platformPosUi[1], platformPosUi[2]));
+            }
+
+            Vector3 platformScale = platformTransform->GetScale();
+            float platformScaleUi[3] = { platformScale.x, platformScale.y, platformScale.z };
+            if (ImGui::InputFloat3("Platform scale", platformScaleUi, "%.2f"))
+            {
+                platformScaleUi[0] = std::max(0.01f, platformScaleUi[0]);
+                platformScaleUi[1] = std::max(0.01f, platformScaleUi[1]);
+                platformScaleUi[2] = std::max(0.01f, platformScaleUi[2]);
+                platformTransform->SetScale(Vector3(platformScaleUi[0], platformScaleUi[1], platformScaleUi[2]));
+            }
+        }
         ImGui::SeparatorText("Grass density");
         ImGui::InputInt("Grass blades", &grassBladeCount, 100, 1000);
         if (ImGui::IsItemDeactivatedAfterEdit())

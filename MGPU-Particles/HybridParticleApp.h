@@ -22,6 +22,7 @@
 #include <vector>
 
 struct ImGui_ImplDX12_InitInfo;
+class Transform;
 
 class HybridParticleApp :
     public Common::D3DApp
@@ -243,6 +244,8 @@ protected:
     int windFieldGridResolution = 12;
     int grassBladeCount = 5000;
     float grassWorldSize = 200.0f;
+    std::shared_ptr<Transform> grassFieldTransform = nullptr;
+    std::shared_ptr<Transform> platformTransform = nullptr;
     int pendingGrassBladeCount = -1;
     bool fpsLimitEnabled = true;
     int fpsLimitTarget = 60;
