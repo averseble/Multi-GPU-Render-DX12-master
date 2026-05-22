@@ -12,9 +12,69 @@
 #include "GDevice.h"
 #include "GShader.h"
 #include "GDeviceFactory.h"
+#include "d3dUtil.h"
+#include <Windows.h>
+#include <stdexcept>
 
 namespace PEPEngine::Graphics
 {
+    namespace
+    {
+        // Project assets use paths like "Data\Textures\foo.png" relative to cwd, but Visual Studio
+        // often sets cwd to the project directory while the exe sits in x64\Debug\ and Data\ may
+        // live at repo root. Resolve: cwd-relative, then exe directory, then ancestors of the exe.
+        std::filesystem::path ResolveTextureInputPath(const std::filesystem::path& input)
+        {
+            namespace fs = std::filesystem;
+
+            const fs::path normalized = input.lexically_normal();
+
+            if (normalized.is_absolute())
+            {
+                return normalized;
+            }
+
+            if (exists(normalized))
+            {
+                return fs::weakly_canonical(normalized);
+            }
+
+            const fs::path fromCwd = (fs::current_path() / normalized).lexically_normal();
+            if (exists(fromCwd))
+            {
+                return fs::weakly_canonical(fromCwd);
+            }
+
+            wchar_t moduleBuf[MAX_PATH]{};
+            const DWORD nChars = GetModuleFileNameW(nullptr, moduleBuf, MAX_PATH);
+            if (nChars != 0 && nChars < MAX_PATH)
+            {
+                fs::path dir = fs::path(moduleBuf).parent_path();
+                for (int depth = 0; depth < 8 && !dir.empty(); ++depth)
+                {
+                    const fs::path candidate = (dir / normalized).lexically_normal();
+                    if (exists(candidate))
+                    {
+                        return fs::weakly_canonical(candidate);
+                    }
+
+                    if (!dir.has_parent_path())
+                    {
+                        break;
+                    }
+                    fs::path parent = dir.parent_path();
+                    if (parent == dir)
+                    {
+                        break;
+                    }
+                    dir = std::move(parent);
+                }
+            }
+
+            return normalized;
+        }
+    } // namespace
+
     std::wstring GTexture::GetFilePath() const
     {
         return filePath;
@@ -75,7 +135,7 @@ namespace PEPEngine::Graphics
         signature.AddDescriptorParameter(&srvCbvRanges[0], 1);
         signature.AddDescriptorParameter(&srvCbvRanges[1], 1);
         signature.AddStaticSampler(samplerDesc);
-        signature.Initialize(GDeviceFactory::GetDevice());
+        signature.Initialize(GDeviceFactory::GetDevice(), false, D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
         return GRootSignature(signature);
     }
@@ -100,9 +160,24 @@ namespace PEPEngine::Graphics
     {
         UINT requiredHeapSize = 0;
 
-        for (int i = 0; i < count; ++i)
+        // Typed UAV mip generation only works for UAV-capable *pixel* formats AND resources created with
+        // D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS (WIC/TGA path). DDS is typically created without UAV —
+        // even uncompressed DDS would hit CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE (#340). BC* also cannot
+        // use typed UAVs (#342).
+        for (size_t i = 0; i < count; ++i)
         {
-            requiredHeapSize += textures[i]->GetD3D12Resource()->GetDesc().MipLevels - 1;
+            const auto desc = textures[i]->GetD3D12Resource()->GetDesc();
+            const bool canUseTypedUavMipPass = IsUAVCompatibleFormat(desc.Format) &&
+                ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0);
+
+            if (canUseTypedUavMipPass && desc.MipLevels > 1)
+            {
+                requiredHeapSize += desc.MipLevels - 1;
+            }
+            else
+            {
+                textures[i]->HasMipMap = desc.MipLevels > 1;
+            }
         }
 
         if (requiredHeapSize == 0)
@@ -136,6 +211,14 @@ namespace PEPEngine::Graphics
 
             auto texture = tex->GetD3D12Resource().Get();
             auto textureDesc = texture->GetDesc();
+
+            const bool canUseTypedUavMipPass = IsUAVCompatibleFormat(textureDesc.Format) &&
+                ((textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0);
+
+            if (!canUseTypedUavMipPass)
+            {
+                continue;
+            }
 
             for (uint32_t TopMip = 0; TopMip < textureDesc.MipLevels - 1; TopMip++)
             {
@@ -259,12 +342,14 @@ namespace PEPEngine::Graphics
     {
         HRESULT hr = CoInitializeEx(nullptr, COINITBASE_MULTITHREADED);
 
-        std::filesystem::path filePath(filepath);
+        std::filesystem::path filePath = ResolveTextureInputPath(std::filesystem::path(filepath));
         if (!exists(filePath))
         {
-            assert("File not found.");
+            OutputDebugStringW((L"[GTexture] File not found: " + filepath + L"\n").c_str());
+            throw std::runtime_error("GTexture::LoadTextureFromFile: texture file not found (see debug output).");
         }
 
+        const std::wstring resolvedWide = filePath.wstring();
 
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage scratchImage;
@@ -275,31 +360,42 @@ namespace PEPEngine::Graphics
         if (filePath.extension() == ".dds" || filePath.extension() == ".DDS")
         {
             ThrowIfFailed(
-                DirectX::LoadFromDDSFile(filepath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, scratchImage));
+                DirectX::LoadFromDDSFile(resolvedWide.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, scratchImage));
         }
         else if (filePath.extension() == ".hdr" || filePath.extension() == ".HDR")
         {
-            ThrowIfFailed(DirectX::LoadFromHDRFile(filepath.c_str(), &metadata, scratchImage));
+            ThrowIfFailed(DirectX::LoadFromHDRFile(resolvedWide.c_str(), &metadata, scratchImage));
         }
         else if (filePath.extension() == ".tga" || filePath.extension() == ".TGA")
         {
-            ThrowIfFailed(DirectX::LoadFromTGAFile(filepath.c_str(), &metadata, scratchImage));
+            ThrowIfFailed(DirectX::LoadFromTGAFile(resolvedWide.c_str(), &metadata, scratchImage));
             resFlags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
         else
         {
-            ThrowIfFailed(
-                DirectX::LoadFromWICFile(filepath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, scratchImage));
+            ThrowIfFailed(DirectX::LoadFromWICFile(
+                resolvedWide.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, scratchImage));
 
             //���� ��� �� DDS ��� "�����������" ��������, �� ��� ��� ����� ����� ������������ �������
             //�� ����� ���� ����������� ������� �� UAV
             resFlags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
 
-        /*���� �������� ����� ��������.*/
-        if (usage == TextureUsage::Albedo && filePath.extension() != ".dds")
+        // Albedo from WIC/TGA may be BGRA; we switch to a UAV-friendly format for generated mips.
+        // Must convert pixel data to match — only rewriting metadata corrupts uploads / triggers device errors.
+        if (usage == TextureUsage::Albedo && filePath.extension() != ".dds" && filePath.extension() != ".DDS")
         {
-            metadata.format = GetUAVCompatableFormat(metadata.format);
+            const DXGI_FORMAT desiredFormat = GetUAVCompatableFormat(metadata.format);
+            if (metadata.format != desiredFormat)
+            {
+                DirectX::ScratchImage converted;
+                ThrowIfFailed(DirectX::Convert(scratchImage.GetImages(), scratchImage.GetImageCount(),
+                                               scratchImage.GetMetadata(), desiredFormat,
+                                               DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT,
+                                               converted));
+                scratchImage = std::move(converted);
+                metadata = scratchImage.GetMetadata();
+            }
         }
 
         D3D12_RESOURCE_DESC desc = {};
@@ -323,7 +419,7 @@ namespace PEPEngine::Graphics
 
         auto ownerDevice = commandList->GetDevice();
 
-        auto tex = std::make_shared<GTexture>(ownerDevice, desc, filepath, usage);
+        auto tex = std::make_shared<GTexture>(ownerDevice, desc, resolvedWide, usage);
         tex->filePath = filePath;
 
 

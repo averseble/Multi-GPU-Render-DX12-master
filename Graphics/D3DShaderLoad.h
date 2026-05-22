@@ -1,11 +1,74 @@
 #pragma once
 #include <d3dcompiler.h>
+#include <filesystem>
 #include <fstream>
+#include <string>
+#include <Windows.h>
+
 #include "d3dUtil.h"
 
 namespace PEPEngine::Graphics
 {
     using namespace Utils;
+
+    /// Resolves paths like Shaders\\Foo.hlsl when the process cwd is not the project/output directory.
+    inline std::wstring ResolveShaderFilePath(const std::wstring& filename)
+    {
+        namespace fs = std::filesystem;
+
+        try
+        {
+            const fs::path normalized = fs::path(filename).lexically_normal();
+
+            if (!normalized.empty() && normalized.is_absolute() && fs::exists(normalized))
+            {
+                return normalized.wstring();
+            }
+
+            if (!normalized.empty() && fs::exists(normalized))
+            {
+                return fs::weakly_canonical(normalized).wstring();
+            }
+
+            const fs::path fromCwd = (fs::current_path() / normalized).lexically_normal();
+            if (fs::exists(fromCwd))
+            {
+                return fs::weakly_canonical(fromCwd).wstring();
+            }
+
+            wchar_t moduleBuf[MAX_PATH]{};
+            const DWORD nChars = GetModuleFileNameW(nullptr, moduleBuf, MAX_PATH);
+            if (nChars != 0 && nChars < MAX_PATH)
+            {
+                fs::path dir = fs::path(moduleBuf).parent_path();
+                for (int depth = 0; depth < 24 && !dir.empty(); ++depth)
+                {
+                    const fs::path candidate = (dir / normalized).lexically_normal();
+                    if (fs::exists(candidate))
+                    {
+                        return fs::weakly_canonical(candidate).wstring();
+                    }
+
+                    if (!dir.has_parent_path())
+                    {
+                        break;
+                    }
+                    fs::path parent = dir.parent_path();
+                    if (parent == dir)
+                    {
+                        break;
+                    }
+                    dir = std::move(parent);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Fall through and return original path for D3D error output.
+        }
+
+        return filename;
+    }
 
     ComPtr<ID3DBlob> LoadBinary(const std::wstring& filename)
     {
@@ -92,9 +155,11 @@ namespace PEPEngine::Graphics
 
         HRESULT hr = S_OK;
 
+        const std::wstring resolved = ResolveShaderFilePath(filename);
+
         ComPtr<ID3DBlob> byteCode = nullptr;
         ComPtr<ID3DBlob> errors;
-        hr = D3DCompileFromFile(filename.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        hr = D3DCompileFromFile(resolved.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE,
                                 entrypoint.c_str(), target.c_str(), compileFlags, 0, &byteCode, &errors);
 
         if (errors != nullptr)

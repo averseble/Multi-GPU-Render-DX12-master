@@ -19,7 +19,7 @@ void CrossAdapterParticleEmitter::InitPSO(const std::shared_ptr<GDevice>& otherD
     computeRS->AddDescriptorParameter(&rng[1], 1);
     computeRS->AddDescriptorParameter(&rng[2], 1);
     computeRS->AddDescriptorParameter(&rng[3], 1);
-    computeRS->Initialize(otherDevice);
+        computeRS->Initialize(otherDevice, false, D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
     injectPSO = std::make_shared<ComputePSO>();
     injectPSO->SetShader(injectedShader.get());

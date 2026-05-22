@@ -1,21 +1,27 @@
 #include "HybridParticleApp.h"
 
+#include "d3dUtil.h"
+#include "imgui.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <locale>
 #include <string>
 #include <thread>
+#include <DirectXPackedVector.h>
 #include "CameraController.h"
 #include "CrossAdapterParticleEmitter.h"
 #include "GameObject.h"
 #include "GCommandQueue.h"
 #include "GDescriptorHeap.h"
 #include "GDeviceFactory.h"
+#include "GResourceStateTracker.h"
 #include "GModel.h"
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
@@ -27,6 +33,287 @@
 #include "SkyBox.h"
 #include "Transform.h"
 #include "Window.h"
+#include "d3dx12.h"
+
+namespace
+{
+    using DirectX::SimpleMath::Vector2;
+    using DirectX::SimpleMath::Vector3;
+    using DirectX::SimpleMath::Vector4;
+    using Microsoft::WRL::ComPtr;
+
+    /// Cross-adapter ID3D12CommandQueue::Wait on shared fences often raises DXGI invalid-call (0x87A) in validation;
+    /// waiting on the fence from the CPU preserves the dependency without using queue Wait.
+    void WaitForSharedFenceValueCpu(const ComPtr<ID3D12Fence>& fence, UINT64 value)
+    {
+        if (!fence)
+            return;
+        if (fence->GetCompletedValue() >= value)
+            return;
+
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!ev)
+            return;
+
+        if (FAILED(fence->SetEventOnCompletion(value, ev)))
+        {
+            CloseHandle(ev);
+            return;
+        }
+
+        WaitForSingleObject(ev, INFINITE);
+        CloseHandle(ev);
+    }
+
+    // Matches `SampleWindGradient` in GrassDraw.hlsl / ComputeGrass.hlsl:
+    // radial gust + optional directional bias from WindDirectionData.xy (blend in z).
+    Vector2 SampleWindGradientHlslXZ(
+        const Vector3& worldPos,
+        uint32_t originCount,
+        const std::array<Vector4, 4>& windOriginData,
+        const std::array<Vector4, 4>& windDirectionData,
+        const float windMapFalloff,
+        Vector2 /*fallbackDirXZ*/)
+    {
+        const uint32_t count = std::min(originCount, 4u);
+
+        if (count == 0)
+            return Vector2::Zero;
+
+        Vector2 accum = Vector2::Zero;
+
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const Vector4 originPacked = windOriginData[i];
+            const Vector4 dirPacked = windDirectionData[i];
+            const Vector3 origin = Vector3(originPacked.x, originPacked.y, originPacked.z);
+            const float radius = std::max(1.0f, originPacked.w);
+            const float strength = std::max(0.0f, dirPacked.w);
+
+            const float dx = worldPos.x - origin.x;
+            const float dz = worldPos.z - origin.z;
+            const float d = sqrtf(dx * dx + dz * dz);
+            if (strength <= 1e-8f)
+                continue;
+
+            const float radialMask = std::clamp(1.f - d / std::max(radius, 1e-4f), 0.f, 1.f);
+            const Vector2 packedDir(dirPacked.x, dirPacked.y);
+            const float dirLen = packedDir.Length();
+            const float dirBlend = dirLen > 1e-6f ? std::clamp(dirPacked.z, 0.0f, 1.0f) : 0.0f;
+            Vector2 radialDir;
+            const float dn = d;
+            const float eps =
+                std::max(0.06f * std::max(radius, 1.f), 0.5f);
+            if (dn <= eps)
+            {
+                const float offsLen2 = dx * dx + dz * dz;
+                if (offsLen2 < 1e-8f)
+                    radialDir = Vector2(1.f, 0.f);
+                else
+                    radialDir = Vector2(dx, dz) * (1.f / std::max(dn, 1e-4f));
+            }
+            else
+                radialDir = Vector2(dx, dz) * (1.f / dn);
+
+            const Vector2 directionalDir = dirLen > 1e-6f ? (packedDir / dirLen) : radialDir;
+            const float directionalMask = 1.0f;
+            const float mask = radialMask + (directionalMask - radialMask) * dirBlend;
+            if (mask <= 1e-6f)
+                continue;
+
+            const float radialWeight = powf(std::max(radialMask, 1e-5f), std::max(0.1f, windMapFalloff)) * strength;
+            const float directionalWeight = directionalMask * strength;
+            const float w = radialWeight + (directionalWeight - radialWeight) * dirBlend;
+
+            Vector2 flowDir = radialDir + (directionalDir - radialDir) * dirBlend;
+            const float flowLen = flowDir.Length();
+            if (flowLen > 1e-6f)
+                flowDir /= flowLen;
+            else
+                flowDir = radialDir;
+
+            accum += flowDir * w;
+        }
+
+        const float lenAccum = sqrtf(std::max(accum.x * accum.x + accum.y * accum.y, 0.f));
+        if (lenAccum > 1e-8f)
+        {
+            const float capped = std::min(8.0f, lenAccum * 2.85f);
+            accum *= (capped / lenAccum);
+            return accum;
+        }
+
+        return Vector2::Zero;
+    }
+
+    float HalfBitsToFloat(const uint16_t bits)
+    {
+        union Bits
+        {
+            uint16_t u;
+            DirectX::PackedVector::HALF h;
+        };
+        Bits b{};
+        b.u = bits;
+        return static_cast<float>(b.h);
+    }
+
+    Vector2 SampleFluidRg16Nearest(const UINT8* row0, const UINT rowPitchBytes, const UINT grid, const int ix, const int iy)
+    {
+        const int gx = std::clamp(ix, 0, static_cast<int>(grid) - 1);
+        const int gy = std::clamp(iy, 0, static_cast<int>(grid) - 1);
+        const UINT8* p =
+            row0 + static_cast<size_t>(gy) * rowPitchBytes + static_cast<size_t>(gx) * sizeof(uint16_t) * 2;
+        uint16_t hx = 0, hy = 0;
+        std::memcpy(&hx, p, sizeof(uint16_t));
+        std::memcpy(&hy, p + sizeof(uint16_t), sizeof(uint16_t));
+        return Vector2(HalfBitsToFloat(hx), HalfBitsToFloat(hy));
+    }
+
+    Vector2 SampleFluidRg16Bilinear(const UINT8* row0, const UINT rowPitchBytes, const UINT gridW,
+                                   const UINT gridH, const float su, const float sv)
+    {
+        const UINT gridX = std::max(gridW, 1u);
+        const UINT gridY = std::max(gridH, gridX);
+        const float gx = su * static_cast<float>(gridX) - 0.5f;
+        const float gy = sv * static_cast<float>(gridY) - 0.5f;
+
+        const int x0 = static_cast<int>(std::floorf(gx));
+        const int y0 = static_cast<int>(std::floorf(gy));
+
+        const float tx = gx - static_cast<float>(x0);
+        const float ty = gy - static_cast<float>(y0);
+
+        Vector2 v00 = SampleFluidRg16Nearest(row0, rowPitchBytes, gridX, x0, y0);
+        Vector2 v10 = SampleFluidRg16Nearest(row0, rowPitchBytes, gridX, x0 + 1, y0);
+        Vector2 v01 = SampleFluidRg16Nearest(row0, rowPitchBytes, gridX, x0, y0 + 1);
+        Vector2 v11 = SampleFluidRg16Nearest(row0, rowPitchBytes, gridX, x0 + 1, y0 + 1);
+
+        const Vector2 lerpBottom = v00 + (v10 - v00) * tx;
+        const Vector2 lerpTop = v01 + (v11 - v01) * tx;
+        return lerpBottom + (lerpTop - lerpBottom) * ty;
+    }
+
+    Vector2 WorldPosToFluidUv(const Vector3& worldPos, const Vector4& windFieldWorldParams)
+    {
+        const float he = std::max(windFieldWorldParams.z, 1e-4f);
+        const float su =
+            (worldPos.x - windFieldWorldParams.x) / (2.0f * he) + 0.5f;
+        const float sv =
+            (worldPos.z - windFieldWorldParams.y) / (2.0f * he) + 0.5f;
+        return Vector2(std::clamp(su, 0.0f, 1.0f), std::clamp(sv, 0.0f, 1.0f));
+    }
+
+    Vector2 WorldPosToGrassPatchUv(const Vector3& worldPos, const float worldSize,
+                                 const Transform* grassTransform)
+    {
+        Vector3 localPos = worldPos;
+        if (grassTransform != nullptr)
+        {
+            const Matrix invWorld = grassTransform->GetWorldMatrix().Invert();
+            const Vector4 h = Vector4::Transform(
+                Vector4(worldPos.x, worldPos.y, worldPos.z, 1.0f), invWorld);
+            localPos = Vector3(h.x, h.y, h.z);
+        }
+        const float halfGrass = std::max(worldSize * 0.5f, 1e-4f);
+        return Vector2(
+            std::clamp((localPos.x + halfGrass) / (2.0f * halfGrass), 0.0f, 1.0f),
+            std::clamp((localPos.z + halfGrass) / (2.0f * halfGrass), 0.0f, 1.0f));
+    }
+
+    Vector2 SampleLod0DebugGradientWindLocal(const Vector3& grassLocalPos, const float worldSize,
+                                             const float minWorldSpeed, const float maxWorldSpeed,
+                                             const int axis, const Vector2& flowDir)
+    {
+        const float halfGrass = std::max(worldSize * 0.5f, 1e-4f);
+        const float u = std::clamp((grassLocalPos.x + halfGrass) / (2.0f * halfGrass), 0.0f, 1.0f);
+        const float v = std::clamp((grassLocalPos.z + halfGrass) / (2.0f * halfGrass), 0.0f, 1.0f);
+        const float t = (axis == 0) ? u : v;
+        const float mag = minWorldSpeed + (maxWorldSpeed - minWorldSpeed) * t;
+        Vector2 dir = flowDir;
+        if (dir.LengthSquared() < 1e-8f)
+            dir = Vector2(1.0f, 0.0f);
+        dir.Normalize();
+        return dir * std::max(mag, 0.0f);
+    }
+
+    Vector2 SampleLod0DebugGradientWindFromNormalizedUv(const float u, const float v,
+                                                       const float minWorldSpeed,
+                                                       const float maxWorldSpeed, const int axis)
+    {
+        const float t = (axis == 0) ? u : v;
+        const float mag = minWorldSpeed + (maxWorldSpeed - minWorldSpeed) * std::clamp(t, 0.0f, 1.0f);
+        return Vector2(std::max(mag, 0.0f), 0.0f);
+    }
+
+    float SampleScalarBilinear(const std::vector<float>& buf, const UINT w, const UINT h,
+                               const float su, const float sv)
+    {
+        if (buf.empty() || w == 0 || h == 0)
+            return 0.0f;
+        const float gx = su * static_cast<float>(w) - 0.5f;
+        const float gy = sv * static_cast<float>(h) - 0.5f;
+        const int x0 = static_cast<int>(std::floorf(gx));
+        const int y0 = static_cast<int>(std::floorf(gy));
+        const float tx = gx - static_cast<float>(x0);
+        const float ty = gy - static_cast<float>(y0);
+        auto at = [&](int x, int y) -> float
+        {
+            x = std::clamp(x, 0, static_cast<int>(w) - 1);
+            y = std::clamp(y, 0, static_cast<int>(h) - 1);
+            return buf[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)];
+        };
+        const float v00 = at(x0, y0);
+        const float v10 = at(x0 + 1, y0);
+        const float v01 = at(x0, y0 + 1);
+        const float v11 = at(x0 + 1, y0 + 1);
+        const float b = v00 + (v10 - v00) * tx;
+        const float t = v01 + (v11 - v01) * tx;
+        return b + (t - b) * ty;
+    }
+
+    float PreviewWallMask(const float su, const float sv, const bool wallEnabled,
+                          const float wallU, const float wallV, const float /*wallAngleRad*/,
+                          const float radius, const float /*halfWidth*/)
+    {
+        if (!wallEnabled)
+            return 0.0f;
+        const float dx = su - wallU;
+        const float dy = sv - wallV;
+        const float r = std::max(radius, 0.01f);
+        return (dx * dx + dy * dy) < (r * r) ? 1.0f : 0.0f;
+    }
+
+    Vector3 WindVectorToPreviewColorAbs(const Vector2& wind, const float visScale)
+    {
+        // Shadertoy-like preview: abs(velocity) * scale (no signed direction hue mapping).
+        return Vector3(std::abs(wind.x), std::abs(wind.y), 0.0f) * visScale;
+    }
+
+    Vector3 WindVectorToPreviewColorSigned(const Vector2& wind, const float visScale)
+    {
+        const float mag = wind.Length();
+        if (mag <= 1e-6f)
+            return Vector3::Zero;
+        float vis = std::clamp(mag * visScale, 0.0f, 1.0f);
+        vis = std::pow(vis, 0.58f);
+        const float angle = std::atan2(wind.y, wind.x);
+        const float hue = angle * (0.5f / 3.1415926535f) + 0.5f;
+        const float h6 = hue * 6.0f;
+        const float x = 1.0f - std::abs(std::fmod(h6, 2.0f) - 1.0f);
+        if (h6 < 1.0f)
+            return Vector3(vis, x * vis, 0.0f);
+        if (h6 < 2.0f)
+            return Vector3(x * vis, vis, 0.0f);
+        if (h6 < 3.0f)
+            return Vector3(0.0f, vis, x * vis);
+        if (h6 < 4.0f)
+            return Vector3(0.0f, x * vis, vis);
+        if (h6 < 5.0f)
+            return Vector3(x * vis, 0.0f, vis);
+        return Vector3(vis, 0.0f, x * vis);
+    }
+}
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -144,6 +431,13 @@ void HybridParticleApp::EnablePerformanceSweepMode(int warmupSeconds, int sample
 
 void HybridParticleApp::Update(const GameTimer& gt)
 {
+    if (imguiInitialized)
+    {
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+    }
+
     if (pendingGrassBladeCount > 0)
     {
         Flush();
@@ -153,21 +447,117 @@ void HybridParticleApp::Update(const GameTimer& gt)
         }
         pendingGrassBladeCount = -1;
     }
+
+    float fieldCenterX = 0.0f;
+    float fieldCenterZ = 0.0f;
+    float fieldHalf = 200.0f;
+    GetGrassWindFieldExtents(fieldCenterX, fieldCenterZ, fieldHalf);
+    const float baseAngleRad = grassWindBaseAngleDeg * (3.1415926535f / 180.0f);
+    const Vector2 baseFlowDir(std::cos(baseAngleRad), std::sin(baseAngleRad));
+    bool clickWindActive = false;
+    Vector2 clickFluidUv = Vector2(0.5f, 0.5f);
+    float clickFluidRadiusSq = 0.01f;
+
+    grassWindOriginCount = 0;
+
+    const bool imguiBlocksSceneInput =
+        imguiInitialized && ImGui::GetIO().WantCaptureMouse;
+
+    if (!isAppPaused && camera != nullptr && MainWindow != nullptr && GetMouse()->IsLeftDown() &&
+        !imguiBlocksSceneInput)
+    {
+        Vector3 cursorHit{};
+        if (TryPickGrassGroundFromMouse(GetMouse()->GetPosX(), GetMouse()->GetPosY(), cursorHit))
+        {
+            clickWindActive = true;
+            const int idx = std::clamp(grassWindOriginCount, 0, 3);
+            grassWindOrigins[idx] = Vector4(
+                cursorHit.x,
+                cursorHit.y,
+                cursorHit.z,
+                std::max(12.0f, grassWindCursorRadius));
+            // z=0 => pure radial disturbance from click.
+            grassWindDirections[idx] =
+                Vector4(0.f, 0.f, 0.f, std::clamp(grassWindCursorStrength * 4.0f, 0.0f, 16.0f));
+            grassWindOriginCount = std::min(4, idx + 1);
+
+            clickFluidUv = WorldPosToGrassPatchUv(cursorHit, grassWorldSize, grassFieldTransform.get());
+            const float fieldSpan = std::max(grassWorldSize, 1.0f);
+            const float radiusUv = std::clamp(grassWindCursorRadius / fieldSpan, 0.01f, 0.35f);
+            clickFluidRadiusSq = radiusUv * radiusUv;
+        }
+    }
+
+    if (!clickWindActive && std::max(0.0f, grassWindBaseStrength) > 1e-5f)
+    {
+        const float baseRadius = std::max(
+            50.0f, fieldHalf * std::max(0.25f, grassWindBaseCoverage) * 2.1f);
+        const Vector2 inlet2 = Vector2(fieldCenterX, fieldCenterZ) - baseFlowDir * (fieldHalf * 0.95f);
+
+        const int idx = std::clamp(grassWindOriginCount, 0, 3);
+        grassWindOrigins[idx] = Vector4(inlet2.x, 0.0f, inlet2.y, baseRadius);
+        // z=1 => fully directional field, w=strength.
+        grassWindDirections[idx] = Vector4(
+            baseFlowDir.x, baseFlowDir.y, 1.0f, std::clamp(grassWindBaseStrength, 0.0f, 4.0f));
+        grassWindOriginCount = std::min(4, idx + 1);
+    }
+
     for (auto* emitter : crossGrassEmitters)
     {
+        emitter->AdvanceTime(static_cast<float>(gt.DeltaTime()));
         emitter->SetLodBladeCounts(static_cast<uint32_t>(std::max(1, grassLod0BladeCount)),
                                    static_cast<uint32_t>(std::max(1, grassLod1BladeCount)));
         emitter->SetWindIntensity(std::max(0.0f, grassWindIntensity));
         emitter->SetWindAmplitude(std::max(0.0f, grassWindAmplitude));
+        emitter->SetWindStrength(std::max(0.5f, grassWindAmplitude));
         emitter->SetLod0Sdof(grassLod0SdofNaturalFreq, grassLod0SdofDampingRatio);
         emitter->SetLodBladeSize(grassLod0BladeWidthScale, grassLod0BladeHeightScale,
                                  grassLod1BladeWidthScale, grassLod1BladeHeightScale);
-        emitter->SetWindGradient(static_cast<uint32_t>(std::clamp(grassWindOriginCount, 1, 4)),
+        emitter->SetWindGradient(static_cast<uint32_t>(std::clamp(grassWindOriginCount, 0, 4)),
                                  std::max(0.1f, grassWindMapFalloff),
                                  grassWindOrigins.data(), grassWindDirections.data());
         emitter->SetFieldInfluenceScale(grassFieldInfluenceScale);
+        emitter->SetLod0LeanGain(grassLod0LeanGain);
         emitter->SetDebugNearestOriginTint(debugNearestOriginTint);
-        emitter->SetWindDirection(grassWindDirection);
+        emitter->SetWindDirection(baseFlowDir);
+        emitter->SetClickWindBoost(clickWindActive ? 1.0f : 0.0f);
+        if (clickWindActive && UseCrossAdapter && grassGpuWindFluid)
+        {
+            emitter->SetWindFluidClickImpulse(
+                clickFluidUv.x,
+                clickFluidUv.y,
+                grassWindCursorStrength * 120.0f,
+                clickFluidRadiusSq);
+        }
+        else
+        {
+            emitter->SetWindFluidClickImpulse(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        const float fluidEn =
+            UseCrossAdapter && grassGpuWindFluid ? 1.0f : 0.0f;
+        emitter->SetGpuWindFluid(fluidEn, grassGpuWindFluidBlend,
+                                 static_cast<uint32_t>(
+                                     std::clamp(grassGpuWindJacobiIterations, 2, 40)));
+        emitter->SetWindFluidSimulationTuning(
+            grassGpuWindInjectStrength,
+            grassGpuWindDissipation,
+            grassGpuWindDt,
+            grassGpuWindVorticityEps,
+            static_cast<uint32_t>(std::clamp(grassGpuWindGridResolution, 32, 512)));
+        const float wallAngleRad = grassGpuWindWallAngleDeg * (3.1415926535f / 180.0f);
+        emitter->SetWindFluidWall(grassGpuWindWallEnable,
+                                  grassGpuWindWallPosU,
+                                  grassGpuWindWallPosV,
+                                  wallAngleRad,
+                                  grassGpuWindWallHalfLength,
+                                  grassGpuWindWallHalfWidth,
+                                  grassGpuWindWallDrag,
+                                  grassGpuWindWallWake);
+        emitter->SetLod0DebugGradientWind(
+            grassLod0DebugGradient,
+            grassLod0DebugGradMin,
+            grassLod0DebugGradMax,
+            grassLod0DebugGradAxis == 1 ? 1.0f : 0.0f);
     }
 
     const UINT olderIndex = currentFrameResourceIndex - 1 > globalCountFrameResources
@@ -210,6 +600,18 @@ void HybridParticleApp::Update(const GameTimer& gt)
     UpdateMainPassCB(gt);
     UpdateShadowPassCB(gt);
     UpdateSsaoCB(gt);
+
+    for (auto* grassEmitter : crossGrassEmitters)
+    {
+        grassEmitter->SetFrustumCullingData(
+            mainPassCB.ViewProj,
+            mainPassCB.EyePosW,
+            grassCullMaxDistance,
+            grassLod0Distance,
+            grassLod1Distance,
+            static_cast<uint32_t>(grassLod0BaseSegments),
+            grassWindTessellationScale);
+    }
 }
 
 void HybridParticleApp::PopulateShadowMapCommands(std::shared_ptr<GCommandList> cmdList)
@@ -395,10 +797,14 @@ void HybridParticleApp::Draw(const GameTimer& gt)
 
     const UINT timestampHeapIndex = 2 * currentFrameResourceIndex;
 
+    const bool crossFencesReady = secondRenderFence && secondComputeFence && primeRenderFence &&
+                                  primeComputeFence;
+    // Use second GPU + cross-adapter fences only when enabled and fences exist; otherwise same-GPU queue waits.
+    const bool useCrossGpuPath = UseCrossAdapter && crossFencesReady;
 
     std::shared_ptr<GCommandQueue> computeQueue;
 
-    if (UseCrossAdapter)
+    if (useCrossGpuPath)
     {
         computeQueue = secondDevice->GetCommandQueue(GQueueType::Compute);
     }
@@ -409,9 +815,9 @@ void HybridParticleApp::Draw(const GameTimer& gt)
 
     auto renderQueue = primeDevice->GetCommandQueue(GQueueType::Graphics);
 
-    if (UseCrossSync)
+    if (useCrossGpuPath)
     {
-        computeQueue->Wait(secondRenderFence, sharedRenderFenceValue);
+        WaitForSharedFenceValueCpu(secondRenderFence, sharedRenderFenceValue);
     }
     else
     {
@@ -423,6 +829,18 @@ void HybridParticleApp::Draw(const GameTimer& gt)
         const auto cmdList = computeQueue->GetCommandList();
 
         cmdList->EndQuery(timestampHeapIndex);
+
+        for (auto* grassEmitter : crossGrassEmitters)
+        {
+            grassEmitter->SetFrustumCullingData(
+                mainPassCB.ViewProj,
+                mainPassCB.EyePosW,
+                grassCullMaxDistance,
+                grassLod0Distance,
+                grassLod1Distance,
+                static_cast<uint32_t>(grassLod0BaseSegments),
+                grassWindTessellationScale);
+        }
 
         for (auto emitter : crossEmitter)
         {
@@ -439,10 +857,10 @@ void HybridParticleApp::Draw(const GameTimer& gt)
 
         currentFrameResource->ComputeFenceValue = computeQueue->ExecuteCommandList(cmdList);
 
-        if (UseCrossSync)
+        if (useCrossGpuPath)
         {
             sharedComputeFenceValue = currentFrameResource->ComputeFenceValue;
-            secondComputeFence->Signal(sharedComputeFenceValue);
+            computeQueue->Signal(secondComputeFence, sharedComputeFenceValue);
         }
     }
 
@@ -452,6 +870,16 @@ void HybridParticleApp::Draw(const GameTimer& gt)
 
 
         cmdList->EndQuery(timestampHeapIndex);
+
+        if (useCrossGpuPath)
+        {
+            WaitForSharedFenceValueCpu(primeComputeFence, sharedComputeFenceValue);
+        }
+        else
+        {
+            renderQueue->Wait(computeQueue);
+        }
+
         PopulateNormalMapCommands(cmdList);
         PopulateAmbientMapCommands(cmdList);
         PopulateShadowMapCommands(cmdList);
@@ -468,19 +896,12 @@ void HybridParticleApp::Draw(const GameTimer& gt)
         cmdList->EndQuery(timestampHeapIndex + 1);
         cmdList->ResolveQuery(timestampHeapIndex, 2, timestampHeapIndex * sizeof(UINT64));
 
-        if (UseCrossSync)
-        {
-            renderQueue->Wait(primeComputeFence, sharedComputeFenceValue);
-        }
-        else
-            renderQueue->Wait(computeQueue);
-
         currentFrameResource->PrimeRenderFenceValue = renderQueue->ExecuteCommandList(cmdList);
 
-        if (UseCrossSync)
+        if (useCrossGpuPath)
         {
             sharedRenderFenceValue = currentFrameResource->PrimeRenderFenceValue;
-            primeRenderFence->Signal(sharedRenderFenceValue);
+            renderQueue->Signal(primeRenderFence, sharedRenderFenceValue);
         }
     }
 
@@ -522,24 +943,30 @@ bool HybridParticleApp::Initialize()
     Flush();
 
     InitImGui();
+    InitWindGradientPreviewTexture();
 
     return true;
 }
 
 void HybridParticleApp::InitDevices()
 {
-    auto allDevices = GDeviceFactory::GetAllDevices(true);
+    // Hardware adapters only. GetAllDevices(true) appends WARP, so with one GPU [0] was discrete and [1] was WARP,
+    // which breaks cross-adapter fences and crashes in GCommandQueue::Wait (0x87A in DXGI / validation).
+    auto allDevices = GDeviceFactory::GetAllDevices(false);
+    ThrowIfFailed(allDevices.empty() ? E_FAIL : S_OK);
 
     const auto firstDevice = allDevices[0];
-    const auto otherDevice = allDevices[1];
+    const auto otherDevice = allDevices.size() > 1 ? allDevices[1] : firstDevice;
 
-    if (!(firstDevice->GetName().find(L"NVIDIA") != std::wstring::npos))
+    if (firstDevice->GetName().find(L"NVIDIA") != std::wstring::npos)
     {
-        if (otherDevice->GetName().find(L"NVIDIA") != std::wstring::npos)
-        {
-            primeDevice = otherDevice;
-            secondDevice = firstDevice;
-        }
+        primeDevice = firstDevice;
+        secondDevice = otherDevice;
+    }
+    else if (otherDevice->GetName().find(L"NVIDIA") != std::wstring::npos)
+    {
+        primeDevice = otherDevice;
+        secondDevice = firstDevice;
     }
     else
     {
@@ -547,6 +974,19 @@ void HybridParticleApp::InitDevices()
         secondDevice = otherDevice;
     }
 
+    HaveTwoHardwareAdapters = allDevices.size() >= 2;
+    CrossAdapterSharingCapable =
+        HaveTwoHardwareAdapters && primeDevice->IsCrossAdapterTextureSupported() &&
+        secondDevice->IsCrossAdapterTextureSupported();
+    HaveCrossAdapterHardware = HaveTwoHardwareAdapters;
+
+    CrossAdapterFencesCreated = false;
+    if (HaveTwoHardwareAdapters)
+    {
+        TryCreateCrossAdapterFences();
+    }
+
+    UseCrossAdapter = CrossAdapterFencesCreated;
 
     assets = std::make_shared<AssetsLoader>(primeDevice);
 
@@ -557,8 +997,11 @@ void HybridParticleApp::InitDevices()
             MemoryAllocator::CreateVector<std::shared_ptr<Renderer>>());
     }
 
-    primeDevice->SharedFence(primeComputeFence, secondDevice, secondComputeFence, sharedComputeFenceValue);
-    primeDevice->SharedFence(primeRenderFence, secondDevice, secondRenderFence, sharedRenderFenceValue);
+    if (HaveTwoHardwareAdapters && !CrossAdapterFencesCreated)
+    {
+        logQueue.Push(
+            L"\nCross-adapter shared fences could not be created at init; use \"Use Multi-GPU render\" to retry. Multi-GPU stays off until fences succeed.");
+    }
 
 
     logQueue.Push(L"\nPrime Device: " + (primeDevice->GetName()));
@@ -572,6 +1015,26 @@ void HybridParticleApp::InitDevices()
 
     primeAdapterDescValid = primeDevice->TryGetAdapterDesc3(primeAdapterDesc);
     secondAdapterDescValid = secondDevice->TryGetAdapterDesc3(secondAdapterDesc);
+}
+
+bool HybridParticleApp::TryCreateCrossAdapterFences()
+{
+    if (!HaveTwoHardwareAdapters || !primeDevice || !secondDevice)
+    {
+        CrossAdapterFencesCreated = false;
+        return false;
+    }
+
+    primeComputeFence.Reset();
+    secondComputeFence.Reset();
+    primeRenderFence.Reset();
+    secondRenderFence.Reset();
+
+    const bool ok =
+        primeDevice->TrySharedFence(primeComputeFence, secondDevice, secondComputeFence, sharedComputeFenceValue) &&
+        primeDevice->TrySharedFence(primeRenderFence, secondDevice, secondRenderFence, sharedRenderFenceValue);
+    CrossAdapterFencesCreated = ok;
+    return ok;
 }
 
 void HybridParticleApp::InitFrameResource()
@@ -797,7 +1260,7 @@ void HybridParticleApp::LoadStudyTexture()
     skyTex->SetName(L"skyTex");
     assets->AddTexture(skyTex);
 
-    auto grassTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\grass.dds", cmdList);
+    auto grassTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\grassBlades.dds", cmdList);
     grassTex->SetName(L"grassTex");
     assets->AddTexture(grassTex);
 
@@ -1138,11 +1601,17 @@ void HybridParticleApp::CreateGO()
 
     for (auto* emitter : crossEmitter)
     {
-        emitter->EnableShared();
+        if (UseCrossAdapter)
+            emitter->EnableShared();
+        else
+            emitter->DisableShared();
     }
     for (auto* emitter : crossGrassEmitters)
     {
-        emitter->EnableShared();
+        if (UseCrossAdapter)
+            emitter->EnableShared();
+        else
+            emitter->DisableShared();
     }
 
     //logQueue.Push(std::wstring(L"\nFinish create GO"));
@@ -1183,16 +1652,15 @@ void HybridParticleApp::CalculateFrameStats()
                 grassFieldInfluenceScale = std::max(0.0f, s.fieldInfluenceScale);
             }
 
-            UseCrossAdapter = multi;
-            UseCrossSync = false;
+            UseCrossAdapter = multi && CrossAdapterFencesCreated;
             for (auto* emitter : crossEmitter)
             {
-                if (multi) emitter->EnableShared();
+                if (UseCrossAdapter) emitter->EnableShared();
                 else emitter->DisableShared();
             }
             for (auto* emitter : crossGrassEmitters)
             {
-                if (multi) emitter->EnableShared();
+                if (UseCrossAdapter) emitter->EnableShared();
                 else emitter->DisableShared();
             }
             perfStageStartTime = timer.TotalTime();
@@ -1314,15 +1782,14 @@ void HybridParticleApp::CalculateFrameStats()
 
 
         const std::wstring title = L"FPS " + std::to_wstring(fps) + L" Step:" + (
-                UseCrossAdapter ? (UseCrossSync ? L"3" : L"2") : L"1") + L"/3" + L" Progress: " + std::to_wstring(
+                UseCrossAdapter ? L"2" : L"1") + L"/2" + L" Progress: " + std::to_wstring(
                 (static_cast<float>(writeStaticticCount) / StatisticStepSecondsCount) * 100.0f) + L"/" +
             std::to_wstring(100);
 
         if (writeStaticticCount >= StatisticStepSecondsCount)
         {
             const std::wstring staticticStr =
-                L"\nUse Cross Adapter: " + std::to_wstring(UseCrossAdapter) +
-                L"\nUse Cross Sync: " + std::to_wstring(UseCrossSync)
+                L"\nUse Cross Adapter: " + std::to_wstring(UseCrossAdapter)
                 + L"\n\tMin FPS:" + std::to_wstring(minFps)
                 + L"\n\tMin MSPF:" + std::to_wstring(minMspf)
                 + L"\n\tMax FPS:" + std::to_wstring(maxFps)
@@ -1353,7 +1820,11 @@ void HybridParticleApp::CalculateFrameStats()
             secondGPUComputingTimeMax = std::numeric_limits<UINT64>::min();
             secondGPUComputingTimeMin = std::numeric_limits<UINT64>::max();
 
-            if (UseCrossAdapter == false)
+            if (!HaveTwoHardwareAdapters || !CrossAdapterFencesCreated)
+            {
+                IsStop = true;
+            }
+            else if (UseCrossAdapter == false)
             {
                 Flush();
                 for (auto&& emitter : crossEmitter)
@@ -1370,16 +1841,7 @@ void HybridParticleApp::CalculateFrameStats()
             }
             else
             {
-                if (UseCrossSync == false)
-                {
-                    Flush();
-                    UseCrossSync = true;
-
-                    primeRenderFence->Signal(currentFrameResource->PrimeRenderFenceValue);
-                    primeComputeFence->Signal(currentFrameResource->ComputeFenceValue);
-                }
-                else
-                    IsStop = true;
+                IsStop = true;
             }
         }
         else
@@ -1865,9 +2327,494 @@ void HybridParticleApp::ShutdownImGui()
     }
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
+
+    ReleaseWindGradientPreviewTexture();
+
     ImGui::DestroyContext();
     imguiSrvDescriptors = GDescriptor();
     imguiInitialized = false;
+}
+
+void HybridParticleApp::GetGrassWindFieldExtents(float& outCenterX, float& outCenterZ, float& outHalfExtent) const
+{
+    outCenterX = 0.0f;
+    outCenterZ = 0.0f;
+    outHalfExtent = std::max(200.0f, grassWorldSize * 0.5f);
+
+    if (grassFieldTransform)
+    {
+        const Vector3 p = grassFieldTransform->GetWorldPosition();
+        const Vector3 s = grassFieldTransform->GetScale();
+        outCenterX = p.x;
+        outCenterZ = p.z;
+        outHalfExtent = std::max(outHalfExtent, grassWorldSize * 0.5f *
+                                                   std::max(std::fabs(s.x), std::fabs(s.z)));
+        return;
+    }
+
+    if (!crossGrassEmitters.empty() && crossGrassEmitters[0] && crossGrassEmitters[0]->gameObject)
+    {
+        const auto t = crossGrassEmitters[0]->gameObject->GetTransform();
+        if (t)
+        {
+            const Vector3 p = t->GetWorldPosition();
+            const Vector3 s = t->GetScale();
+            outCenterX = p.x;
+            outCenterZ = p.z;
+            outHalfExtent = std::max(outHalfExtent, grassWorldSize * 0.5f *
+                                                       std::max(std::fabs(s.x), std::fabs(s.z)));
+        }
+    }
+}
+
+bool HybridParticleApp::TryPickGrassGroundFromMouse(const int clientX, const int clientY, Vector3& outHitWorld) const
+{
+    if (!camera || !MainWindow || !camera->gameObject)
+        return false;
+
+    const float winW = static_cast<float>(MainWindow->GetClientWidth());
+    const float winH = static_cast<float>(MainWindow->GetClientHeight());
+    if (winW <= 1.0f || winH <= 1.0f)
+        return false;
+
+    const float ndcX = (2.f * static_cast<float>(clientX) / winW) - 1.f;
+    const float ndcY = -(2.f * static_cast<float>(clientY) / winH) + 1.f;
+
+    const Matrix invVP = (camera->GetViewMatrix() * camera->GetProjectionMatrix()).Invert();
+    Vector4 hFar = Vector4::Transform(Vector4(ndcX, ndcY, 1.f, 1.f), invVP);
+    if (fabsf(hFar.w) < 1e-5f)
+        return false;
+    hFar /= hFar.w;
+
+    const Vector3 worldFar(hFar.x, hFar.y, hFar.z);
+    const Vector3 eye = camera->gameObject->GetTransform()->GetWorldPosition();
+
+    Vector3 rayDir = worldFar - eye;
+    const float rLen = rayDir.Length();
+    if (rLen < 1e-5f)
+        return false;
+    rayDir /= rLen;
+
+    float groundY = 0.f;
+    if (grassFieldTransform)
+        groundY = grassFieldTransform->GetWorldPosition().y;
+    else if (!crossGrassEmitters.empty() && crossGrassEmitters[0] && crossGrassEmitters[0]->gameObject)
+        groundY = crossGrassEmitters[0]->gameObject->GetTransform()->GetWorldPosition().y;
+
+    if (fabsf(rayDir.y) < 1e-5f)
+        return false;
+
+    const float t = (groundY - eye.y) / rayDir.y;
+    if (!(std::isfinite(t)) || t < 0.f)
+        return false;
+
+    outHitWorld = eye + rayDir * t;
+    outHitWorld.y = groundY;
+    return true;
+}
+
+void HybridParticleApp::InitWindGradientPreviewTexture()
+{
+    windGradientPreviewReady = false;
+
+    if (!primeDevice ||
+        windGradientPreviewSrvIndex >= static_cast<UINT>(globalCountFrameResources))
+        return;
+
+    const UINT w = windGradientPreviewW;
+    const UINT h = windGradientPreviewH;
+
+    ID3D12Device* device = primeDevice->GetDXDevice().Get();
+
+    CD3DX12_HEAP_PROPERTIES heapDefault(D3D12_HEAP_TYPE_DEFAULT);
+    const CD3DX12_RESOURCE_DESC texDesc =
+        CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+                                     static_cast<UINT64>(w), h, 1, 1);
+
+    if (FAILED(device->CreateCommittedResource(
+            &heapDefault,
+            D3D12_HEAP_FLAG_NONE,
+            &texDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(windGradientPreviewTexture.GetAddressOf()))))
+        return;
+
+    const unsigned rowBytesUnaligned = static_cast<unsigned>(w) * sizeof(uint32_t);
+    const UINT rowPitchAligned = (rowBytesUnaligned + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u)
+        & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+    windGradientPreviewRowPitch = rowPitchAligned;
+    const UINT64 uploadByteSize = static_cast<UINT64>(rowPitchAligned) * static_cast<UINT64>(h);
+
+    CD3DX12_HEAP_PROPERTIES heapUpload(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadByteSize);
+
+    if (FAILED(device->CreateCommittedResource(
+            &heapUpload,
+            D3D12_HEAP_FLAG_NONE,
+            &bufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(windGradientPreviewUpload.GetAddressOf()))))
+    {
+        windGradientPreviewTexture.Reset();
+        return;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MostDetailedMip = 0;
+    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.ResourceMinLODClamp = 0.0f;
+    srv.Texture2D.PlaneSlice = 0;
+
+    device->CreateShaderResourceView(
+        windGradientPreviewTexture.Get(),
+        &srv,
+        imguiSrvDescriptors.GetCPUHandle(windGradientPreviewSrvIndex));
+    windGradientPreviewSrvGpu = imguiSrvDescriptors.GetGPUHandle(windGradientPreviewSrvIndex);
+    windGradientPreviewReady = true;
+    windFluidGpuPreviewCacheValid_ = false;
+    windFluidGpuPreviewCache_.clear();
+}
+
+void HybridParticleApp::ReleaseWindGradientPreviewTexture()
+{
+    windGradientPreviewTexture.Reset();
+    windGradientPreviewUpload.Reset();
+    windGradientPreviewSrvGpu.ptr = 0;
+    windGradientPreviewReady = false;
+    windGradientPreviewShowsGpuFluid_ = false;
+    windFluidReadbackSecond_.Reset();
+    windFluidReadbackGrid_ = 0;
+    windFluidRbTotalBytes_ = 0;
+    windFluidRbLayout_ = {};
+    windFluidGpuPreviewCacheValid_ = false;
+    windFluidGpuPreviewCache_.clear();
+    windFluidGpuPreviewFrameCounter_ = 0;
+    windPreviewDye_.clear();
+    windPreviewDyeTmp_.clear();
+    windPreviewDyeValid_ = false;
+}
+
+void HybridParticleApp::EnsureWindFluidReadbackMatchesVelocity(ID3D12Resource* velocityTex)
+{
+    if (!velocityTex || !secondDevice)
+        return;
+
+    const D3D12_RESOURCE_DESC desc = velocityTex->GetDesc();
+    const UINT grid = static_cast<UINT>(desc.Width);
+    if (grid == 0 || grid != desc.Height)
+        return;
+
+    UINT numRows = 0;
+    UINT64 rowSize = 0;
+    UINT64 totalBytes = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    secondDevice->GetDXDevice()->GetCopyableFootprints(&desc, 0u, 1u, 0ull, &footprint, &numRows, &rowSize,
+                                                       &totalBytes);
+
+    const bool unchanged = windFluidReadbackSecond_ && windFluidReadbackGrid_ == grid &&
+                           windFluidRbTotalBytes_ == totalBytes;
+
+    windFluidRbLayout_ = footprint;
+    if (unchanged)
+        return;
+
+    windFluidReadbackSecond_.Reset();
+    windFluidReadbackGrid_ = grid;
+    windFluidRbTotalBytes_ = totalBytes;
+
+    CD3DX12_HEAP_PROPERTIES heapReadback(D3D12_HEAP_TYPE_READBACK);
+    const CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(totalBytes);
+
+    HRESULT hr = secondDevice->GetDXDevice()->CreateCommittedResource(
+        &heapReadback,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_COMMON,
+        nullptr,
+        IID_PPV_ARGS(windFluidReadbackSecond_.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        windFluidReadbackSecond_.Reset();
+        windFluidReadbackGrid_ = 0;
+        windFluidRbTotalBytes_ = 0;
+        windFluidRbLayout_ = {};
+    }
+}
+
+bool HybridParticleApp::TryRebuildWindGradientPreviewFromSecondGpu(UINT8* mapped)
+{
+    if (!mapped || !secondDevice || crossGrassEmitters.empty() || crossGrassEmitters[0] == nullptr)
+        return false;
+
+    const uint32_t kGpuFluidPreviewIntervalFrames = (windPreviewMode_ == 2) ? 20u : 8u;
+    const size_t cacheBytes =
+        static_cast<size_t>(windGradientPreviewRowPitch) * static_cast<size_t>(windGradientPreviewH);
+
+    CrossAdapterGrassEmitter* emitter = crossGrassEmitters[0];
+    if (!emitter->IsCrossAdapterSharedComputeActive() || !emitter->IsWindFluidGpuReady())
+        return false;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> vel = emitter->GetExpandWindVelocityResource();
+    if (!vel)
+        vel = emitter->GetWindFluid().GetVelocityResource();
+    if (!vel)
+        return false;
+
+    EnsureWindFluidReadbackMatchesVelocity(vel.Get());
+    if (!windFluidReadbackSecond_ || windFluidRbTotalBytes_ == 0)
+        return false;
+
+    const bool throttleSkip =
+        (++windFluidGpuPreviewFrameCounter_ % kGpuFluidPreviewIntervalFrames) != 0u &&
+        windFluidGpuPreviewCacheValid_ && windFluidGpuPreviewCache_.size() == cacheBytes;
+
+    if (throttleSkip)
+    {
+        std::memcpy(mapped, windFluidGpuPreviewCache_.data(), cacheBytes);
+        return true;
+    }
+
+    if (UseCrossAdapter && secondComputeFence)
+        WaitForSharedFenceValueCpu(secondComputeFence, sharedComputeFenceValue);
+
+    auto computeQueue = secondDevice->GetCommandQueue(GQueueType::Compute);
+
+    try
+    {
+        const auto rdCmdList = computeQueue->GetCommandList();
+
+        rdCmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        rdCmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COPY_DEST);
+        rdCmdList->FlushResourceBarriers();
+
+        CD3DX12_TEXTURE_COPY_LOCATION dstRb(windFluidReadbackSecond_.Get(), windFluidRbLayout_);
+        CD3DX12_TEXTURE_COPY_LOCATION srcVel(vel.Get(), 0u);
+        rdCmdList->GetGraphicsCommandList()->CopyTextureRegion(&dstRb, 0, 0, 0, &srcVel, nullptr);
+
+        rdCmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        rdCmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COMMON);
+        rdCmdList->FlushResourceBarriers();
+
+        const uint64_t copyFenceValue = computeQueue->ExecuteCommandList(rdCmdList);
+        WaitForSharedFenceValueCpu(computeQueue->GetFence(), copyFenceValue);
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    BYTE* mappedReadback = nullptr;
+    if (FAILED(windFluidReadbackSecond_->Map(0u, nullptr, reinterpret_cast<void**>(&mappedReadback))))
+        return false;
+
+    const UINT rbPitchBytes = windFluidRbLayout_.Footprint.RowPitch;
+    const UINT8* fluidRows =
+        reinterpret_cast<const UINT8*>(mappedReadback) + windFluidRbLayout_.Offset;
+
+    const size_t dyeSize = static_cast<size_t>(windGradientPreviewW) * static_cast<size_t>(windGradientPreviewH);
+    if (windPreviewDye_.size() != dyeSize)
+    {
+        windPreviewDye_.assign(dyeSize, 0.0f);
+        windPreviewDyeTmp_.assign(dyeSize, 0.0f);
+        windPreviewDyeValid_ = false;
+        windPreviewDyeExposure_ = 4.0f;
+    }
+    if (!windPreviewDyeValid_)
+    {
+        std::fill(windPreviewDye_.begin(), windPreviewDye_.end(), 0.0f);
+        windPreviewDyeValid_ = true;
+        windPreviewDyeExposure_ = 4.0f;
+    }
+
+    const UINT gridW = std::max(windFluidRbLayout_.Footprint.Width, 1u);
+    const UINT gridH = std::max(windFluidRbLayout_.Footprint.Height, gridW);
+
+    for (UINT py = 0; py < windGradientPreviewH; ++py)
+    {
+        UINT8* rowBase = mapped + static_cast<size_t>(py) * windGradientPreviewRowPitch;
+        for (UINT px = 0; px < windGradientPreviewW; ++px)
+        {
+            const float su = (static_cast<float>(px) + 0.5f) / static_cast<float>(windGradientPreviewW);
+            const float sv = (static_cast<float>(py) + 0.5f) / static_cast<float>(windGradientPreviewH);
+            Vector3 rgb = Vector3::Zero;
+            const Vector2 wind =
+                SampleFluidRg16Bilinear(fluidRows, rbPitchBytes, gridW, gridH, su, sv);
+            if (windPreviewMode_ == 2)
+            {
+                const float mag = std::sqrt(std::max(wind.x * wind.x + wind.y * wind.y, 0.0f));
+                const float vis = std::pow(std::clamp(mag * 0.008f, 0.0f, 1.0f), 0.55f);
+                rgb = Vector3(vis * 0.88f, vis * 0.94f, vis);
+            }
+            else if (windPreviewMode_ == 1)
+            {
+                rgb = WindVectorToPreviewColorSigned(wind, 0.08f);
+            }
+            else
+            {
+                rgb = WindVectorToPreviewColorAbs(wind, 0.008f);
+            }
+            const float wallMask = PreviewWallMask(su, sv, grassGpuWindWallEnable,
+                                                   grassGpuWindWallPosU, grassGpuWindWallPosV,
+                                                   grassGpuWindWallAngleDeg * (3.1415926535f / 180.0f),
+                                                   grassGpuWindWallHalfLength, grassGpuWindWallHalfWidth);
+            if (wallMask > 0.0f)
+            {
+                const float a = std::clamp(wallMask, 0.0f, 1.0f);
+                rgb = rgb * (1.0f - a) + Vector3(0.5f, 0.5f, 0.5f) * a;
+            }
+
+            const auto enc = [](const float c) -> UINT8 {
+                const int v =
+                    static_cast<int>(std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+                return static_cast<UINT8>(v);
+            };
+
+            rowBase[static_cast<size_t>(px) * 4u + 0u] = enc(rgb.x);
+            rowBase[static_cast<size_t>(px) * 4u + 1u] = enc(rgb.y);
+            rowBase[static_cast<size_t>(px) * 4u + 2u] = enc(rgb.z);
+            rowBase[static_cast<size_t>(px) * 4u + 3u] = 255;
+        }
+    }
+
+    if (windFluidGpuPreviewCache_.size() != cacheBytes)
+        windFluidGpuPreviewCache_.resize(cacheBytes);
+    std::memcpy(windFluidGpuPreviewCache_.data(), mapped, cacheBytes);
+    windFluidGpuPreviewCacheValid_ = true;
+
+    windFluidReadbackSecond_->Unmap(0u, nullptr);
+    return true;
+}
+
+void HybridParticleApp::RefreshWindGradientPreviewTexture(const std::shared_ptr<GCommandList>& cmdList)
+{
+    if (!windGradientPreviewReady || !cmdList || !windGradientPreviewTexture ||
+        !windGradientPreviewUpload)
+        return;
+
+    UINT8* mapped = nullptr;
+    const D3D12_RANGE readRange = {0, 0};
+    if (FAILED(windGradientPreviewUpload->Map(0, &readRange,
+                                               reinterpret_cast<void**>(&mapped))))
+        return;
+
+    const bool gpuEligible =
+        UseCrossAdapter && secondDevice && !crossGrassEmitters.empty() && crossGrassEmitters[0] &&
+        crossGrassEmitters[0]->IsCrossAdapterSharedComputeActive() &&
+        crossGrassEmitters[0]->IsWindFluidGpuReady();
+
+    if (grassLod0DebugGradient && showWindFieldDebug)
+    {
+        for (UINT py = 0; py < windGradientPreviewH; ++py)
+        {
+            UINT8* rowBase = mapped + static_cast<size_t>(py) * windGradientPreviewRowPitch;
+            for (UINT px = 0; px < windGradientPreviewW; ++px)
+            {
+                const float su = (static_cast<float>(px) + 0.5f) / static_cast<float>(windGradientPreviewW);
+                const float sv = (static_cast<float>(py) + 0.5f) / static_cast<float>(windGradientPreviewH);
+                const Vector2 wind = SampleLod0DebugGradientWindFromNormalizedUv(
+                    su, sv, grassLod0DebugGradMin, grassLod0DebugGradMax, grassLod0DebugGradAxis);
+                Vector3 rgb = WindVectorToPreviewColorAbs(wind, 0.008f);
+                const auto enc = [](const float c) -> UINT8 {
+                    return static_cast<UINT8>(std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+                };
+                rowBase[static_cast<size_t>(px) * 4 + 0] = enc(rgb.x);
+                rowBase[static_cast<size_t>(px) * 4 + 1] = enc(rgb.y);
+                rowBase[static_cast<size_t>(px) * 4 + 2] = enc(rgb.z);
+                rowBase[static_cast<size_t>(px) * 4 + 3] = 255;
+            }
+        }
+        windGradientPreviewShowsGpuFluid_ = false;
+    }
+    else
+    {
+    const bool usedGpuFluid =
+        windPreviewLiveGpuReadback_ && gpuEligible &&
+        TryRebuildWindGradientPreviewFromSecondGpu(mapped);
+    windGradientPreviewShowsGpuFluid_ = usedGpuFluid;
+
+    if (!usedGpuFluid)
+    {
+        float fieldCenterX = 0.f;
+        float fieldCenterZ = 0.f;
+        float fieldHalf = 50.f;
+        GetGrassWindFieldExtents(fieldCenterX, fieldCenterZ, fieldHalf);
+
+        const uint32_t originCount = static_cast<uint32_t>(
+            std::clamp(grassWindOriginCount, 0, 4));
+
+        for (UINT py = 0; py < windGradientPreviewH; ++py)
+        {
+            UINT8* rowBase = mapped + static_cast<size_t>(py) * windGradientPreviewRowPitch;
+            for (UINT px = 0; px < windGradientPreviewW; ++px)
+            {
+                const float fx = (-0.5f +
+                                  ((static_cast<float>(px) + 0.5f) / static_cast<float>(windGradientPreviewW)))
+                    * 2.0f * fieldHalf;
+                const float fz = (-0.5f +
+                                  ((static_cast<float>(py) + 0.5f) / static_cast<float>(windGradientPreviewH)))
+                    * 2.0f * fieldHalf;
+
+                const Vector3 worldPos(fieldCenterX + fx, 0.f, fieldCenterZ + fz);
+                const Vector2 wind = SampleWindGradientHlslXZ(
+                    worldPos, originCount, grassWindOrigins, grassWindDirections,
+                    grassWindMapFalloff, Vector2::Zero);
+
+                float su = (worldPos.x - fieldCenterX) / (2.0f * std::max(fieldHalf, 1e-4f)) + 0.5f;
+                float sv = (worldPos.z - fieldCenterZ) / (2.0f * std::max(fieldHalf, 1e-4f)) + 0.5f;
+                su = std::clamp(su, 0.0f, 1.0f);
+                sv = std::clamp(sv, 0.0f, 1.0f);
+                Vector3 rgb = (windPreviewMode_ == 1)
+                                  ? WindVectorToPreviewColorSigned(wind, 0.08f)
+                                  : WindVectorToPreviewColorAbs(wind, 0.008f);
+                const float wallMask = PreviewWallMask(su, sv, grassGpuWindWallEnable,
+                                                       grassGpuWindWallPosU, grassGpuWindWallPosV,
+                                                       grassGpuWindWallAngleDeg * (3.1415926535f / 180.0f),
+                                                       grassGpuWindWallHalfLength, grassGpuWindWallHalfWidth);
+                if (wallMask > 0.0f)
+                {
+                    const float a = std::clamp(wallMask, 0.0f, 1.0f);
+                    rgb = rgb * (1.0f - a) + Vector3(0.5f, 0.5f, 0.5f) * a;
+                }
+
+                const auto enc = [=](const float c) -> UINT8 {
+                    const int v =
+                        static_cast<int>(std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+                    return static_cast<UINT8>(v);
+                };
+
+                rowBase[static_cast<size_t>(px) * 4 + 0] = enc(rgb.x);
+                rowBase[static_cast<size_t>(px) * 4 + 1] = enc(rgb.y);
+                rowBase[static_cast<size_t>(px) * 4 + 2] = enc(rgb.z);
+                rowBase[static_cast<size_t>(px) * 4 + 3] = 255;
+            }
+        }
+    }
+    }
+
+    windGradientPreviewUpload->Unmap(0, nullptr);
+
+    cmdList->TransitionBarrier(windGradientPreviewTexture, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->FlushResourceBarriers();
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    fp.Offset = 0;
+    fp.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    fp.Footprint.Width = windGradientPreviewW;
+    fp.Footprint.Height = windGradientPreviewH;
+    fp.Footprint.Depth = 1;
+    fp.Footprint.RowPitch = windGradientPreviewRowPitch;
+
+    CD3DX12_TEXTURE_COPY_LOCATION dstLoc(windGradientPreviewTexture.Get(), 0);
+    CD3DX12_TEXTURE_COPY_LOCATION srcLoc(windGradientPreviewUpload.Get(), fp);
+    cmdList->GetGraphicsCommandList()->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+    cmdList->TransitionBarrier(windGradientPreviewTexture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->FlushResourceBarriers();
 }
 
 void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
@@ -1876,20 +2823,30 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         return;
 
     cmdList->SetDescriptorsHeap(&imguiSrvDescriptors);
-    ImGui_ImplDX12_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
 
-    if (ImGui::Begin("Hybrid GPU / adapter statistics", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    if (windGradientPreviewReady && showWindFieldDebug)
+        RefreshWindGradientPreviewTexture(cmdList);
+
+    if (ImGui::Begin("Navier-Stokes Wind", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         bool useMultiGpuRender = UseCrossAdapter;
+        if (!HaveTwoHardwareAdapters)
+        {
+            ImGui::BeginDisabled();
+            useMultiGpuRender = false;
+        }
         if (ImGui::Checkbox("Use Multi-GPU render", &useMultiGpuRender))
         {
-            UseCrossAdapter = useMultiGpuRender;
-            if (!UseCrossAdapter)
+            if (useMultiGpuRender && !CrossAdapterFencesCreated)
             {
-                UseCrossSync = false;
+                TryCreateCrossAdapterFences();
             }
+            if (!CrossAdapterFencesCreated)
+            {
+                useMultiGpuRender = false;
+            }
+
+            UseCrossAdapter = useMultiGpuRender && CrossAdapterFencesCreated;
 
             for (auto* emitter : crossEmitter)
             {
@@ -1907,137 +2864,201 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
                     emitter->DisableShared();
             }
         }
+        if (!HaveTwoHardwareAdapters)
+        {
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("(requires two hardware GPUs)");
+        }
+        else if (!CrossAdapterFencesCreated)
+        {
+            ImGui::TextDisabled("(cross-adapter fences not created — check the box to try again)");
+        }
 
         ImGui::Text("Cross-adapter compute: %s", UseCrossAdapter ? "on (second GPU)" : "off (prime GPU)");
-        ImGui::Text("Cross-adapter sync fences: %s", UseCrossSync ? "on" : "off");
-        ImGui::SeparatorText("Frame limiter");
-        ImGui::Checkbox("Enable FPS limit", &fpsLimitEnabled);
-        ImGui::SliderInt("FPS cap", &fpsLimitTarget, 20, 240);
-        ImGui::SeparatorText("Scene transforms");
-        if (grassFieldTransform)
+        if (UseCrossAdapter)
         {
-            Vector3 grassPos = grassFieldTransform->GetLocalPosition();
-            float grassPosUi[3] = { grassPos.x, grassPos.y, grassPos.z };
-            if (ImGui::InputFloat3("Grass field position", grassPosUi, "%.1f"))
-            {
-                grassFieldTransform->SetPosition(Vector3(grassPosUi[0], grassPosUi[1], grassPosUi[2]));
-            }
+            ImGui::TextDisabled("Cross-adapter GPU fences: on (automatic shared fences)");
+        }
+        ImGui::SeparatorText("Flow forcing");
+        ImGui::TextDisabled("Base wind is constant directional flow; LMB adds radial disturbances.");
+        ImGui::SliderFloat("Base flow strength", &grassWindBaseStrength, 0.0f, 2.0f, "%.2f");
+        ImGui::SliderFloat("Base flow angle (deg)", &grassWindBaseAngleDeg, -180.0f, 180.0f, "%.1f");
+        ImGui::SliderFloat("Base flow coverage", &grassWindBaseCoverage, 0.25f, 2.5f, "%.2f");
+        ImGui::SliderFloat("Wind cursor radius", &grassWindCursorRadius, 50.0f, 5000.0f, "%.0f");
+        ImGui::SliderFloat("Wind cursor strength", &grassWindCursorStrength, 0.0f, 8.0f, "%.2f");
+        ImGui::TextDisabled("Hold LMB on the 3D view (not ImGui) to inject a local pulse into the flow.");
+        ImGui::SliderFloat("Wind map falloff", &grassWindMapFalloff, 0.1f, 6.0f, "%.2f");
 
-            Vector3 grassScale = grassFieldTransform->GetScale();
-            float grassScaleUi[3] = { grassScale.x, grassScale.y, grassScale.z };
-            if (ImGui::InputFloat3("Grass field scale", grassScaleUi, "%.2f"))
+        ImGui::SeparatorText("GPU wind fluid (cross-adapter expand)");
+        if (!UseCrossAdapter)
+        {
+            ImGui::BeginDisabled();
+        }
+        ImGui::Checkbox("Enable 2D Navier-Stokes wind field", &grassGpuWindFluid);
+        ImGui::SliderFloat("Analytic vs fluid blend", &grassGpuWindFluidBlend, 0.0f, 1.0f, "%.2f");
+        if (grassGpuWindFluid && grassGpuWindFluidBlend < 0.95f)
+            ImGui::TextColored(ImVec4(1.f, 0.75f, 0.2f, 1.f),
+                               "Low blend mixes LMB analytic gusts with fluid and can look intersecting.");
+        ImGui::SliderInt("Pressure solve iterations", &grassGpuWindJacobiIterations, 4, 40);
+        ImGui::SliderInt("Grid resolution", &grassGpuWindGridResolution, 32, 512);
+        ImGui::SliderFloat("Inject strength", &grassGpuWindInjectStrength, 0.0f, 2.0f, "%.3f");
+        ImGui::SliderFloat("Dissipation", &grassGpuWindDissipation, 0.90f, 0.9999f, "%.4f");
+        ImGui::TextDisabled("Dissipation damps velocity each step (0.97-0.99 = softer, smoother flow).");
+        grassGpuWindDt = std::clamp(grassGpuWindDt, 0.001f, 0.05f);
+        ImGui::SliderFloat("Time step", &grassGpuWindDt, 0.001f, 0.05f, "%.4f");
+        ImGui::SliderFloat("Vorticity epsilon", &grassGpuWindVorticityEps, 0.0f, 2.0f, "%.3f");
+        if (ImGui::Button("Apply stable preset (faster)"))
+        {
+            grassGpuWindJacobiIterations = 20;
+            grassGpuWindGridResolution = 128;
+            grassGpuWindInjectStrength = 0.35f;
+            grassGpuWindFluidBlend = 1.0f;
+            grassGpuWindDissipation = 0.985f;
+            grassGpuWindDt = 0.014f;
+            grassGpuWindVorticityEps = 0.0f;
+            windPreviewMode_ = 0;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Use this first, then tune slowly.");
+        ImGui::SeparatorText("Fluid obstacle (Shadertoy circle)");
+        ImGui::Checkbox("Enable obstacle", &grassGpuWindWallEnable);
+        ImGui::SliderFloat("Obstacle U", &grassGpuWindWallPosU, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Obstacle V", &grassGpuWindWallPosV, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Obstacle radius", &grassGpuWindWallHalfLength, 0.02f, 0.25f, "%.3f");
+        ImGui::SliderFloat("Obstacle wake lean", &grassGpuWindWallWake, 0.0f, 200.0f, "%.2f");
+        ImGui::TextDisabled("0 = upright under obstacle. 200 = max lean under circle + downstream wake.");
+        if (!UseCrossAdapter)
+        {
+            ImGui::EndDisabled();
+            ImGui::TextUnformatted("(Requires cross-adapter compute on second GPU.)");
+        }
+        if (UseCrossAdapter && !crossGrassEmitters.empty())
+        {
+            if (crossGrassEmitters[0]->IsWindFluidGpuReady())
+                ImGui::TextUnformatted("GPU fluid sim: ready (textures update each compute frame).");
+            else
             {
-                grassScaleUi[0] = std::max(0.01f, grassScaleUi[0]);
-                grassScaleUi[1] = std::max(0.01f, grassScaleUi[1]);
-                grassScaleUi[2] = std::max(0.01f, grassScaleUi[2]);
-                grassFieldTransform->SetScale(Vector3(grassScaleUi[0], grassScaleUi[1], grassScaleUi[2]));
+                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f),
+                                   "GPU fluid sim: not initialized — only analytic wind is used.");
+                ImGui::TextDisabled(
+                    "[WindFluid] / [ComputePSO] lines in Debug Output show the real error (compile, HRESULT).\n"
+                    "HLSL loads from Shaders\\WindFluid*.hlsl — cwd, then folders above the .exe (rebuild after fixes).");
             }
         }
 
-        if (platformTransform)
+        ImGui::SeparatorText("Grass LOD 0 wind (near camera)");
+        grassLod1Distance = std::max(grassLod1Distance, grassLod0Distance);
+        ImGui::SliderFloat("LOD0 max distance", &grassLod0Distance, 50.0f, grassCullMaxDistance, "%.0f");
+        ImGui::SliderFloat("LOD1 max distance", &grassLod1Distance, grassLod0Distance, grassCullMaxDistance,
+                           "%.0f");
+        ImGui::SliderFloat("Cull max distance", &grassCullMaxDistance, 200.0f, 4000.0f, "%.0f");
+        ImGui::SeparatorText("LOD0 debug linear gradient");
+        ImGui::Checkbox("Use linear gradient (bypass fluid texture)", &grassLod0DebugGradient);
+        if (grassLod0DebugGradient)
         {
-            Vector3 platformPos = platformTransform->GetLocalPosition();
-            float platformPosUi[3] = { platformPos.x, platformPos.y, platformPos.z };
-            if (ImGui::InputFloat3("Platform position", platformPosUi, "%.1f"))
-            {
-                platformTransform->SetPosition(Vector3(platformPosUi[0], platformPosUi[1], platformPosUi[2]));
-            }
-
-            Vector3 platformScale = platformTransform->GetScale();
-            float platformScaleUi[3] = { platformScale.x, platformScale.y, platformScale.z };
-            if (ImGui::InputFloat3("Platform scale", platformScaleUi, "%.2f"))
-            {
-                platformScaleUi[0] = std::max(0.01f, platformScaleUi[0]);
-                platformScaleUi[1] = std::max(0.01f, platformScaleUi[1]);
-                platformScaleUi[2] = std::max(0.01f, platformScaleUi[2]);
-                platformTransform->SetScale(Vector3(platformScaleUi[0], platformScaleUi[1], platformScaleUi[2]));
-            }
-        }
-        ImGui::SeparatorText("Grass density");
-        ImGui::InputInt("Grass blades", &grassBladeCount, 100, 1000);
-        if (ImGui::IsItemDeactivatedAfterEdit())
-        {
-            if (grassBladeCount < 1) grassBladeCount = 1;
-            if (grassBladeCount > 200000) grassBladeCount = 200000;
-            pendingGrassBladeCount = grassBladeCount;
-        }
-        ImGui::SeparatorText("Grass culling / LOD");
-        ImGui::InputInt("LOD0 blades per cluster", &grassLod0BladeCount, 1, 1);
-        ImGui::InputInt("LOD1 blades per cluster", &grassLod1BladeCount, 1, 1);
-        grassLod0BladeCount = std::clamp(grassLod0BladeCount, 1, 4);
-        grassLod1BladeCount = std::clamp(grassLod1BladeCount, 1, 4);
-        float windDir[2] = { grassWindDirection.x, grassWindDirection.y };
-        ImGui::InputFloat2("Wind direction (XZ)", windDir, "%.2f");
-        grassWindDirection = Vector2(windDir[0], windDir[1]);
-        if (grassWindDirection.LengthSquared() < 1e-6f)
-        {
-            grassWindDirection = Vector2(1.0f, 0.0f);
+            ImGui::TextColored(ImVec4(1.f, 0.75f, 0.2f, 1.f),
+                               "Debug gradient ON — GPU fluid map is bypassed for LOD0.");
         }
         else
         {
-            grassWindDirection.Normalize();
+            ImGui::TextDisabled("Debug gradient OFF — LOD0 uses live GPU Navier-Stokes velocity map.");
         }
+        if (grassLod0DebugGradient)
+        {
+            ImGui::SliderFloat("Gradient min |v| (world)", &grassLod0DebugGradMin, 0.0f, 200.0f, "%.1f");
+            ImGui::SliderFloat("Gradient max |v| (world)", &grassLod0DebugGradMax, 0.0f, 200.0f, "%.1f");
+            if (grassLod0DebugGradMax < grassLod0DebugGradMin)
+                grassLod0DebugGradMax = grassLod0DebugGradMin;
+            const char* gradAxes[] = {"Grass local X", "Grass local Z"};
+            ImGui::Combo("Gradient axis", &grassLod0DebugGradAxis, gradAxes, IM_ARRAYSIZE(gradAxes));
+            const float leanStartSpeed = 1.0f / 0.20f;
+            const float minSpeed01 = grassLod0DebugGradMin * 0.20f;
+            const float maxSpeed01 = std::min(1.0f, grassLod0DebugGradMax * 0.20f);
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.55f, 1.0f),
+                               "Flow +world X. Gradient spans the grass patch (local coords).");
+            ImGui::TextDisabled(
+                "speed01 = saturate(|v| * 0.20). Visible lean begins above |v| ~%.1f (speed01>0).",
+                leanStartSpeed);
+            ImGui::TextDisabled(
+                "At min: speed01=%.2f. At max: speed01=%.2f. Full bend cap near speed01=1 (|v|>=%.1f).",
+                minSpeed01, maxSpeed01, leanStartSpeed);
+            ImGui::TextDisabled(
+                "Left side of grass = min (upright). Right side = max lean. Tips darken with gradient t.");
+        }
+        ImGui::SliderFloat("LOD0 SDOF freq", &grassLod0SdofNaturalFreq, 0.5f, 6.0f, "%.2f");
+        ImGui::SliderFloat("LOD0 SDOF damping", &grassLod0SdofDampingRatio, 0.05f, 1.5f, "%.2f");
+        ImGui::TextDisabled("SDOF sliders apply to single-GPU geometry path only.");
+        ImGui::TextDisabled(
+            "LOD0 (green gradient blades): driven ONLY by GPU wind map velocity.\n"
+            "Requires cross-adapter + Navier-Stokes enabled. Turn OFF debug linear gradient.\n"
+            "Circle wake lean comes from fluid flow around the obstacle, not extra sliders.");
+        ImGui::SliderFloat("LOD0 fluid lean gain", &grassLod0LeanGain, 0.5f, 12.0f, "%.2f");
+        ImGui::TextDisabled("Scales GPU velocity map -> bend (debug gradient ignores this).");
+        if (UseCrossAdapter && !crossGrassEmitters.empty() && crossGrassEmitters[0] != nullptr)
+        {
+            const auto& fp = crossGrassEmitters[0]->GetWindFieldWorldParams();
+            ImGui::TextDisabled(
+                "Expand field: center (%.0f, %.0f), half %.0f, cell %.2f world units",
+                fp.x, fp.y, fp.z, fp.w);
+            if (crossGrassEmitters[0]->IsCrossAdapterSharedComputeActive())
+                ImGui::TextDisabled("Grass path: GPU expand + VS_Expanded (bend baked in compute).");
+            else
+                ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
+                                   "Grass path: single-GPU GS (does NOT read GPU wind map for LOD0).");
+        }
+
+        ImGui::SeparatorText("LOD1+ wind response");
+        ImGui::SliderFloat("Field influence scale", &grassFieldInfluenceScale, 0.0f, 6.0f, "%.2f");
+        ImGui::TextDisabled("Affects textured LOD1+ only; LOD0 ignores this.");
         ImGui::SliderFloat("Wind intensity", &grassWindIntensity, 0.0f, 200.0f, "%.2f");
         ImGui::SliderFloat("Wind amplitude", &grassWindAmplitude, 0.0f, 200.0f, "%.2f");
-        ImGui::SliderInt("Wind origins count", &grassWindOriginCount, 1, 4);
-        ImGui::SliderFloat("Wind map falloff", &grassWindMapFalloff, 0.1f, 6.0f, "%.2f");
-        ImGui::SliderFloat("Field influence scale", &grassFieldInfluenceScale, 0.0f, 6.0f, "%.2f");
+
+        ImGui::SeparatorText("Debug");
+        const char* previewModes[] = {"Velocity abs (Shadertoy)", "Velocity direction (debug)", "Smoke magnitude"};
+        ImGui::Combo("Preview mode", &windPreviewMode_, previewModes, IM_ARRAYSIZE(previewModes));
+        if (windPreviewMode_ == 1)
+            ImGui::TextColored(ImVec4(1.f, 0.75f, 0.2f, 1.f),
+                               "Direction mode: use 'Velocity abs' to judge flow seams.");
+        if (ImGui::Button("Use abs preview"))
+            windPreviewMode_ = 0;
         ImGui::Checkbox("Show wind field debug", &showWindFieldDebug);
-        ImGui::Checkbox("Debug nearest-origin tint", &debugNearestOriginTint);
-        ImGui::SliderInt("Wind field grid", &windFieldGridResolution, 4, 40);
-        for (int i = 0; i < grassWindOriginCount; ++i)
+        ImGui::Checkbox("Live GPU preview readback", &windPreviewLiveGpuReadback_);
+        ImGui::SliderInt("Wind field grid", &windFieldGridResolution, 1, 40);
+        ImGui::SeparatorText(
+            grassLod0DebugGradient
+                ? "Wind preview (LOD0 debug linear gradient)"
+                : (windGradientPreviewShowsGpuFluid_
+                       ? "Wind velocity preview (live GPU fluid readback)"
+                       : "Wind velocity preview (CPU analytic - GPU fluid unavailable)"));
+        if (!showWindFieldDebug)
         {
-            float origin[3] = { grassWindOrigins[i].x, grassWindOrigins[i].y, grassWindOrigins[i].z };
-            float radius = grassWindOrigins[i].w;
-            float dir[2] = { grassWindDirections[i].x, grassWindDirections[i].y };
-            float strength = grassWindDirections[i].w;
-
-            std::string originLabel = "Wind origin " + std::to_string(i) + " (XYZ)";
-            std::string radiusLabel = "Wind radius " + std::to_string(i);
-            std::string dirLabel = "Wind dir " + std::to_string(i) + " (XZ)";
-            std::string strengthLabel = "Wind strength " + std::to_string(i);
-            ImGui::InputFloat3(originLabel.c_str(), origin, "%.1f");
-            ImGui::SliderFloat(radiusLabel.c_str(), &radius, 50.0f, 5000.0f, "%.0f");
-            ImGui::InputFloat2(dirLabel.c_str(), dir, "%.2f");
-            ImGui::SliderFloat(strengthLabel.c_str(), &strength, 0.0f, 4.0f, "%.2f");
-
-            grassWindOrigins[i] = Vector4(origin[0], origin[1], origin[2], radius);
-            Vector2 d(dir[0], dir[1]);
-            if (d.LengthSquared() < 1e-6f) d = Vector2(1.0f, 0.0f);
-            else d.Normalize();
-            grassWindDirections[i] = Vector4(d.x, d.y, 0.0f, strength);
+            ImGui::TextDisabled("Preview updates paused (enable 'Show wind field debug').");
         }
-        ImGui::SliderFloat("LOD0 SDOF natural freq", &grassLod0SdofNaturalFreq, 0.1f, 12.0f, "%.2f");
-        ImGui::SliderFloat("LOD0 SDOF damping", &grassLod0SdofDampingRatio, 0.01f, 2.0f, "%.2f");
-        ImGui::SliderFloat("LOD0 blade width", &grassLod0BladeWidthScale, 0.1f, 4.0f, "%.2f");
-        ImGui::SliderFloat("LOD0 blade height", &grassLod0BladeHeightScale, 0.1f, 4.0f, "%.2f");
-        ImGui::SliderFloat("LOD1 blade width", &grassLod1BladeWidthScale, 0.1f, 4.0f, "%.2f");
-        ImGui::SliderFloat("LOD1 blade height", &grassLod1BladeHeightScale, 0.1f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Grass max distance", &grassCullMaxDistance, 100.0f, 4000.0f, "%.0f");
-        ImGui::SliderFloat("LOD0 distance", &grassLod0Distance, 25.0f, 1500.0f, "%.0f");
-        ImGui::SliderFloat("LOD1 distance", &grassLod1Distance, 50.0f, 3000.0f, "%.0f");
-        ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 6);
-        ImGui::SliderFloat("Wind tessellation scale", &grassWindTessellationScale, 0.0f, 8.0f, "%.2f");
-        if (grassLod0Distance > grassCullMaxDistance)
+        else if (windGradientPreviewReady && windGradientPreviewSrvGpu.ptr != 0)
         {
-            grassLod0Distance = grassCullMaxDistance;
+            ImGui::Image((ImTextureID)(windGradientPreviewSrvGpu.ptr), ImVec2(288.0f, 288.0f));
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_None))
+            {
+                if (windGradientPreviewShowsGpuFluid_)
+                    ImGui::SetTooltip(
+                        "Read-back of DXGI_FORMAT_R16G16_FLOAT wind velocity after the solver on the compute adapter.\n"
+                        "Sampling matches ComputeGrass.hlsl SampleFluidWindXZ (world XZ projected into uv 0-1).\n"
+                        "RG encodes direction scaled by strength; faint blue marks magnitude.");
+                else
+                    ImGui::SetTooltip(
+                        "CPU reconstruction of analytic wind (constant base flow + LMB disturbances).\n"
+                        "Use multi-GPU with shared grass compute and an initialized fluid sim for live GPU read-back.");
+            }
+            if (windGradientPreviewShowsGpuFluid_)
+                ImGui::TextDisabled("%ux%u - GPU velocity read-back throttled (%s mode)",
+                                    windGradientPreviewW,
+                                    windGradientPreviewH,
+                                    windPreviewMode_ == 2 ? "dye" : "velocity");
+            else
+                ImGui::TextDisabled("%ux%u - CPU analytic origins only, no live fluid read-back this frame",
+                                    windGradientPreviewW,
+                                    windGradientPreviewH);
         }
-        if (grassLod1Distance < grassLod0Distance)
-        {
-            grassLod1Distance = grassLod0Distance;
-        }
-        if (grassLod1Distance > grassCullMaxDistance)
-        {
-            grassLod1Distance = grassCullMaxDistance;
-        }
-        ImGui::Separator();
-        ImGuiGpuSection("Prime adapter", "Scene render + window present",
-                        primeDevice, primeAdapterDescValid, primeAdapterDesc,
-                        primeGPURenderingTime, primeGPUComputingTime);
-        ImGuiGpuSection("Second adapter",
-                        UseCrossAdapter ? "Compute (particles / grass)" : "Compute (same GPU as prime)",
-                        secondDevice, secondAdapterDescValid, secondAdapterDesc,
-                        secondGPURenderingTime, secondGPUComputingTime);
     }
     ImGui::End();
 
@@ -2046,53 +3067,105 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         const Matrix viewProj = camera->GetViewMatrix() * camera->GetProjectionMatrix();
         const ImVec2 screenSize = ImGui::GetIO().DisplaySize;
         const int grid = std::clamp(windFieldGridResolution, 4, 40);
-        const int activeOrigins = std::clamp(grassWindOriginCount, 1, 4);
+        const int activeOrigins = std::clamp(grassWindOriginCount, 0, 4);
+
+        Vector4 gpuWindFieldParams{};
+        bool haveGpuWindFieldParams = false;
+        if (!crossGrassEmitters.empty() && crossGrassEmitters[0] != nullptr)
+        {
+            gpuWindFieldParams = crossGrassEmitters[0]->GetWindFieldWorldParams();
+            haveGpuWindFieldParams = gpuWindFieldParams.z > 1e-4f;
+        }
+
         float fieldCenterX = 0.0f;
         float fieldCenterZ = 0.0f;
         float fieldHalf = std::max(200.0f, grassWorldSize * 0.5f);
-        if (!crossGrassEmitters.empty() && crossGrassEmitters[0] && crossGrassEmitters[0]->gameObject)
+        if (haveGpuWindFieldParams)
         {
-            const auto t = crossGrassEmitters[0]->gameObject->GetTransform();
-            if (t)
-            {
-                const Vector3 p = t->GetWorldPosition();
-                const Vector3 s = t->GetScale();
-                fieldCenterX = p.x;
-                fieldCenterZ = p.z;
-                fieldHalf = std::max(fieldHalf, grassWorldSize * 0.5f * std::max(std::abs(s.x), std::abs(s.z)));
-            }
+            fieldCenterX = gpuWindFieldParams.x;
+            fieldCenterZ = gpuWindFieldParams.y;
+            fieldHalf = gpuWindFieldParams.z;
         }
+        else
+        {
+            GetGrassWindFieldExtents(fieldCenterX, fieldCenterZ, fieldHalf);
+        }
+        float groundY = 0.0f;
+        if (grassFieldTransform)
+            groundY = grassFieldTransform->GetWorldPosition().y;
+        else if (!crossGrassEmitters.empty() && crossGrassEmitters[0] && crossGrassEmitters[0]->gameObject)
+            groundY = crossGrassEmitters[0]->gameObject->GetTransform()->GetWorldPosition().y;
+
+        bool mappedFluidForDebug = false;
+        const UINT8* debugFluidRows = nullptr;
+        UINT debugFluidPitch = 0;
+        UINT debugFluidGrid = 0;
+        const bool gpuDebugEligible =
+            windGradientPreviewShowsGpuFluid_ && windFluidReadbackSecond_ &&
+            windFluidReadbackGrid_ > 0 && windFluidRbLayout_.Footprint.RowPitch > 0;
+        BYTE* debugMappedPtr = nullptr;
+        if (gpuDebugEligible &&
+            SUCCEEDED(windFluidReadbackSecond_->Map(0u, nullptr, reinterpret_cast<void**>(&debugMappedPtr))))
+        {
+            mappedFluidForDebug = true;
+            debugFluidRows =
+                reinterpret_cast<const UINT8*>(debugMappedPtr) + windFluidRbLayout_.Offset;
+            debugFluidPitch = windFluidRbLayout_.Footprint.RowPitch;
+            debugFluidGrid = windFluidReadbackGrid_;
+        }
+
+        const UINT debugGridW = windFluidRbLayout_.Footprint.Width > 0
+                                    ? windFluidRbLayout_.Footprint.Width
+                                    : debugFluidGrid;
+        const UINT debugGridH = windFluidRbLayout_.Footprint.Height > 0
+                                    ? windFluidRbLayout_.Footprint.Height
+                                    : debugGridW;
+
+        float debugGrassWorldSize = grassWorldSize;
+        if (!crossGrassEmitters.empty() && crossGrassEmitters[0] != nullptr)
+            debugGrassWorldSize = crossGrassEmitters[0]->GetEmitterWorldSize();
+        const float debugGrassHalf = std::max(1.0f, debugGrassWorldSize * 0.5f);
+        const float arrowFieldHalf = grassLod0DebugGradient ? debugGrassHalf : fieldHalf;
+
+        const float baseAngleRadDbg = grassWindBaseAngleDeg * (3.1415926535f / 180.0f);
+        const Vector2 debugFlowDir(std::cos(baseAngleRadDbg), std::sin(baseAngleRadDbg));
 
         auto sampleWindGradient = [&](const Vector3& worldPos) -> Vector2
         {
-            Vector2 accum = Vector2::Zero;
-            float wsum = 0.0f;
-            for (int i = 0; i < activeOrigins; ++i)
+            if (grassLod0DebugGradient)
             {
-                const Vector4 origin = grassWindOrigins[i];
-                const float radius = std::max(1.0f, origin.w);
-                Vector2 dir(grassWindDirections[i].x, grassWindDirections[i].y);
-                if (dir.LengthSquared() < 1e-6f)
-                    continue;
-                dir.Normalize();
-                const float strength = std::max(0.0f, grassWindDirections[i].w);
-                const Vector2 toPoint(worldPos.x - origin.x, worldPos.z - origin.z);
-                const float d = toPoint.Length();
-                const float t = std::clamp(1.0f - d / radius, 0.0f, 1.0f);
-                const float w = std::pow(t, std::max(0.1f, grassWindMapFalloff)) * strength;
-                accum += dir * w;
-                wsum += w;
+                Vector3 localPos = worldPos;
+                if (grassFieldTransform != nullptr)
+                {
+                    const Matrix invWorld = grassFieldTransform->GetWorldMatrix().Invert();
+                    const Vector4 h = Vector4::Transform(
+                        Vector4(worldPos.x, worldPos.y, worldPos.z, 1.0f), invWorld);
+                    localPos = Vector3(h.x, h.y, h.z);
+                }
+                return SampleLod0DebugGradientWindLocal(
+                    localPos, debugGrassWorldSize, grassLod0DebugGradMin, grassLod0DebugGradMax,
+                    grassLod0DebugGradAxis, debugFlowDir);
             }
-            if (wsum > 1e-6f)
+            if (mappedFluidForDebug && debugFluidRows)
             {
-                const float mag = std::clamp(wsum, 0.0f, 1.0f);
-                accum.Normalize();
-                return accum * mag;
+                const Vector4 fieldParams = haveGpuWindFieldParams
+                                                ? gpuWindFieldParams
+                                                : Vector4(fieldCenterX, fieldCenterZ, fieldHalf, 0.0f);
+                const Vector2 uv = WorldPosToGrassPatchUv(worldPos, debugGrassWorldSize, grassFieldTransform.get());
+                Vector2 simVel = SampleFluidRg16Bilinear(
+                    debugFluidRows, debugFluidPitch, debugGridW, debugGridH, uv.x, uv.y);
+                float cellWorld = fieldParams.w;
+                if (cellWorld <= 1e-4f && debugFluidGrid > 0)
+                    cellWorld = (2.0f * std::max(fieldParams.z, 1.0f)) / static_cast<float>(debugFluidGrid);
+                return simVel * std::max(cellWorld, 1e-4f) * 2.0f;
             }
-            Vector2 fallback = grassWindDirection;
-            if (fallback.LengthSquared() < 1e-6f) fallback = Vector2(1.0f, 0.0f);
-            else fallback.Normalize();
-            return fallback * 0.25f;
+            return SampleWindGradientHlslXZ(
+                worldPos,
+                static_cast<uint32_t>(activeOrigins),
+                grassWindOrigins,
+                grassWindDirections,
+                grassWindMapFalloff,
+                Vector2::Zero);
         };
 
         auto project = [&](const Vector3& p, ImVec2& out) -> bool
@@ -2111,15 +3184,30 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         };
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
+        const float maxArrowWorldLen = std::clamp(arrowFieldHalf * 0.012f, 5.0f, 22.0f);
+        const float arrowGain = 0.022f;
         for (int gx = 0; gx < grid; ++gx)
         {
             for (int gz = 0; gz < grid; ++gz)
             {
-                const float fx = (static_cast<float>(gx) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * fieldHalf;
-                const float fz = (static_cast<float>(gz) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * fieldHalf;
-                const Vector3 p0(fieldCenterX + fx, 4.0f, fieldCenterZ + fz);
+                const float fx = (static_cast<float>(gx) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * arrowFieldHalf;
+                const float fz = (static_cast<float>(gz) / static_cast<float>(grid - 1) - 0.5f) * 2.0f * arrowFieldHalf;
+                const Vector3 p0(fieldCenterX + fx, groundY + 1.0f, fieldCenterZ + fz);
                 const Vector2 w = sampleWindGradient(p0);
-                const Vector3 p1 = p0 + Vector3(w.x, 0.0f, w.y) * 60.0f;
+                const float wLen = w.Length();
+                if (wLen < 1e-4f)
+                    continue;
+                float arrowLen = wLen * arrowGain;
+                if (arrowLen < 0.12f)
+                    continue;
+                Vector2 arrowVec = (w / wLen) * arrowLen;
+                float aLen = arrowLen;
+                if (aLen > maxArrowWorldLen)
+                {
+                    arrowVec *= (maxArrowWorldLen / aLen);
+                    aLen = maxArrowWorldLen;
+                }
+                const Vector3 p1 = p0 + Vector3(arrowVec.x, 0.0f, arrowVec.y);
                 ImVec2 s0, s1;
                 if (!project(p0, s0) || !project(p1, s1))
                     continue;
@@ -2139,6 +3227,8 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
             }
         }
         dl->AddText(ImVec2(20.0f, 20.0f), IM_COL32(80, 220, 255, 255), "Wind field debug: ON");
+        if (mappedFluidForDebug)
+            windFluidReadbackSecond_->Unmap(0u, nullptr);
     }
 
     ImGui::Render();

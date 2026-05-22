@@ -16,6 +16,7 @@
 #include "GDescriptor.h"
 #include "Light.h"
 #include <d3d12.h>
+#include <wrl/client.h>
 #include <array>
 #include <string>
 #include <limits>
@@ -54,6 +55,7 @@ protected:
     void Draw(const GameTimer& gt) override;
 
     void InitDevices();
+    bool TryCreateCrossAdapterFences();
     void InitFrameResource();
     void InitRootSignature();
     void InitPipeLineResource();
@@ -81,6 +83,14 @@ protected:
 
     void InitImGui();
     void ShutdownImGui();
+    void InitWindGradientPreviewTexture();
+    void ReleaseWindGradientPreviewTexture();
+    void RefreshWindGradientPreviewTexture(const std::shared_ptr<GCommandList>& cmdList);
+    bool TryRebuildWindGradientPreviewFromSecondGpu(UINT8* uploadMappedBase);
+    void EnsureWindFluidReadbackMatchesVelocity(ID3D12Resource* velocityTex);
+
+    void GetGrassWindFieldExtents(float& outCenterX, float& outCenterZ, float& outHalfExtent) const;
+    bool TryPickGrassGroundFromMouse(int clientX, int clientY, Vector3& outHitWorld) const;
     void DrawImGui(const std::shared_ptr<GCommandList>& cmdList);
 
     std::shared_ptr<GDevice> primeDevice;
@@ -155,8 +165,15 @@ protected:
     custom_vector<custom_vector<std::shared_ptr<Renderer>>> typedRenderer = MemoryAllocator::CreateVector<custom_vector<
         std::shared_ptr<Renderer>>>();
 
-    bool UseCrossAdapter = true;
-    bool UseCrossSync = false;
+    bool UseCrossAdapter = false;
+    /// At least two DXGI hardware adapters (excludes WARP).
+    bool HaveTwoHardwareAdapters = false;
+    /// Shared cross-adapter fences were created successfully (runtime; not tied to CrossAdapterRowMajorTexture).
+    bool CrossAdapterFencesCreated = false;
+    /// Informational: both adapters report CrossAdapterRowMajorTexture (optional feature).
+    bool CrossAdapterSharingCapable = false;
+    /// Two hardware GPUs present (for perf / statistics).
+    bool HaveCrossAdapterHardware = false;
 
 
     custom_vector<CrossAdapterParticleEmitter*> crossEmitter = MemoryAllocator::CreateVector<CrossAdapterParticleEmitter*>();
@@ -199,6 +216,30 @@ protected:
 
     GDescriptor imguiSrvDescriptors;
     bool imguiInitialized = false;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> windGradientPreviewTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> windGradientPreviewUpload;
+    D3D12_GPU_DESCRIPTOR_HANDLE windGradientPreviewSrvGpu{};
+    UINT windGradientPreviewSrvIndex = 1;
+    UINT windGradientPreviewW = 128;
+    UINT windGradientPreviewH = 128;
+    UINT windGradientPreviewRowPitch = 0;
+    bool windGradientPreviewReady = false;
+    bool windGradientPreviewShowsGpuFluid_{false};
+    bool windPreviewLiveGpuReadback_{true};
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> windFluidReadbackSecond_;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT windFluidRbLayout_{};
+    UINT64 windFluidRbTotalBytes_{0};
+    UINT windFluidReadbackGrid_{0};
+    uint32_t windFluidGpuPreviewFrameCounter_{};
+    bool windFluidGpuPreviewCacheValid_{false};
+    std::vector<unsigned char> windFluidGpuPreviewCache_;
+    std::vector<float> windPreviewDye_;
+    std::vector<float> windPreviewDyeTmp_;
+    bool windPreviewDyeValid_{false};
+    float windPreviewDyeExposure_{4.0f};
+    int windPreviewMode_ = 0; // 0=abs velocity, 1=signed velocity, 2=dye
     DXGI_ADAPTER_DESC3 primeAdapterDesc{};
     DXGI_ADAPTER_DESC3 secondAdapterDesc{};
     bool primeAdapterDescValid = false;
@@ -207,8 +248,8 @@ protected:
     bool imguiFontDescriptorInUse = false;
     std::string imguiIniFilePath;
     float grassCullMaxDistance = 1800.0f;
-    float grassLod0Distance = 350.0f;
-    float grassLod1Distance = 1000.0f;
+    float grassLod0Distance = 900.0f;
+    float grassLod1Distance = 1200.0f;
     int grassLod0BaseSegments = 4;
     int grassLod0BladeCount = 3;
     int grassLod1BladeCount = 1;
@@ -221,27 +262,53 @@ protected:
     float grassLod0BladeHeightScale = 1.0f;
     float grassLod1BladeWidthScale = 1.0f;
     float grassLod1BladeHeightScale = 1.0f;
-    Vector2 grassWindDirection = Vector2(1.0f, 0.0f);
-    int grassWindOriginCount = 2;
+    /// 0 while LMB up; 1 with a valid ground hit under the cursor while LMB is held (outside ImGui).
+    int grassWindOriginCount = 0;
+    float grassWindCursorRadius = 900.0f;
+    float grassWindCursorStrength = 3.0f;
+    float grassWindBaseStrength = 0.35f;
+    float grassWindBaseAngleDeg = 0.0f;
+    float grassWindBaseCoverage = 1.2f;
     float grassWindMapFalloff = 1.5f;
-    float grassFieldInfluenceScale = 1.0f;
+    float grassFieldInfluenceScale = 2.0f;
+    float grassLod0LeanGain = 5.0f;
     std::array<Vector4, 4> grassWindOrigins =
     {
-        Vector4(-250.0f, 0.0f, -250.0f, 900.0f),
-        Vector4( 350.0f, 0.0f,  120.0f, 900.0f),
-        Vector4(   0.0f, 0.0f,    0.0f, 900.0f),
-        Vector4(   0.0f, 0.0f,    0.0f, 900.0f)
+        Vector4(0.0f, 0.0f, 0.0f, 900.0f),
+        Vector4(0.0f, 0.0f, 0.0f, 900.0f),
+        Vector4(0.0f, 0.0f, 0.0f, 900.0f),
+        Vector4(0.0f, 0.0f, 0.0f, 900.0f)
     };
     std::array<Vector4, 4> grassWindDirections =
     {
-        Vector4( 1.0f,  0.2f, 0.0f, 1.0f),
-        Vector4(-0.6f,  1.0f, 0.0f, 1.0f),
-        Vector4( 1.0f,  0.0f, 0.0f, 1.0f),
-        Vector4( 1.0f,  0.0f, 0.0f, 1.0f)
+        Vector4(0.0f, 0.0f, 0.0f, 1.0f),
+        Vector4(0.0f, 0.0f, 0.0f, 1.0f),
+        Vector4(0.0f, 0.0f, 0.0f, 1.0f),
+        Vector4(1.0f, 0.0f, 0.0f, 1.0f)
     };
     bool showWindFieldDebug = false;
     bool debugNearestOriginTint = false;
     int windFieldGridResolution = 12;
+    bool grassGpuWindFluid = true;
+    float grassGpuWindFluidBlend = 1.0f;
+    int grassGpuWindJacobiIterations = 20;
+    int grassGpuWindGridResolution = 128;
+    float grassGpuWindInjectStrength = 0.35f;
+    float grassGpuWindDissipation = 0.972f;
+    float grassGpuWindDt = 0.016f;
+    float grassGpuWindVorticityEps = 0.0f;
+    bool grassGpuWindWallEnable = true;
+    float grassGpuWindWallPosU = 0.20f;
+    float grassGpuWindWallPosV = 0.50f;
+    float grassGpuWindWallAngleDeg = 90.0f;
+    float grassGpuWindWallHalfLength = 0.10f;
+    float grassGpuWindWallHalfWidth = 0.018f;
+    float grassGpuWindWallDrag = 0.75f;
+    float grassGpuWindWallWake = 0.55f;
+    bool grassLod0DebugGradient = false;
+    float grassLod0DebugGradMin = 0.0f;
+    float grassLod0DebugGradMax = 80.0f;
+    int grassLod0DebugGradAxis = 0;
     int grassBladeCount = 5000;
     float grassWorldSize = 200.0f;
     std::shared_ptr<Transform> grassFieldTransform = nullptr;

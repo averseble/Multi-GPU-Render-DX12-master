@@ -17,12 +17,12 @@ ParticleData Emitter::GenerateParticle()
 
 //void Emitter::CompileGrassShaders()
 //{
-//	// Шейдер для генерации травы
+//	// ГГҐГ©Г¤ГҐГ° Г¤Г«Гї ГЈГҐГ­ГҐГ°Г Г¶ГЁГЁ ГІГ°Г ГўГ»
 //	generateShader = std::move(
 //		std::make_shared<GShader>(L"Shaders\\GrassGenerate.hlsl", ComputeShader, nullptr, "CS", "cs_5_1"));
 //	generateShader->LoadAndCompile();
 //
-//	// Шейдеры для отрисовки (если нужны отдельно от частиц)
+//	// ГГҐГ©Г¤ГҐГ°Г» Г¤Г«Гї Г®ГІГ°ГЁГ±Г®ГўГЄГЁ (ГҐГ±Г«ГЁ Г­ГіГ¦Г­Г» Г®ГІГ¤ГҐГ«ГјГ­Г® Г®ГІ Г·Г Г±ГІГЁГ¶)
 //	auto vertexShader = std::move(
 //		std::make_shared<GShader>(L"Shaders\\GrassDraw.hlsl", VertexShader, nullptr, "VS", "vs_5_1"));
 //	vertexShader->LoadAndCompile();
@@ -31,7 +31,7 @@ ParticleData Emitter::GenerateParticle()
 //		std::make_shared<GShader>(L"Shaders\\GrassDraw.hlsl", PixelShader, nullptr, "PS", "ps_5_1"));
 //	pixelShader->LoadAndCompile();
 //
-//	// Для травы не нужен geometry shader, используем вершины для создания квадов
+//	// Г„Г«Гї ГІГ°Г ГўГ» Г­ГҐ Г­ГіГ¦ГҐГ­ geometry shader, ГЁГ±ГЇГ®Г«ГјГ§ГіГҐГ¬ ГўГҐГ°ГёГЁГ­Г» Г¤Г«Гї Г±Г®Г§Г¤Г Г­ГЁГї ГЄГўГ Г¤Г®Гў
 //}
 
 void Emitter::CompileComputeShaders()
@@ -135,7 +135,7 @@ void Emitter::PSOInitialize()
         computeSignature->AddDescriptorParameter(&range[1], 1);
         computeSignature->AddDescriptorParameter(&range[2], 1);
         computeSignature->AddDescriptorParameter(&range[3], 1);
-        computeSignature->Initialize(device);
+        computeSignature->Initialize(device, false, D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
         CompileComputeShaders();
 

@@ -19,6 +19,11 @@ public:
     void SetWindStrength(float strength) { emitterData.WindStrength = strength; }
     void SetWindIntensity(float intensity) { emitterData.WindIntensity = intensity; }
     void SetWindAmplitude(float amplitude) { emitterData.WindAmplitude = amplitude; }
+    void SetGpuWindFluid(float enable, float blend)
+    {
+        emitterData.WindFluidEnable = enable;
+        emitterData.WindFluidBlend = blend;
+    }
     void SetLodBladeSize(float lod0WidthScale, float lod0HeightScale, float lod1WidthScale, float lod1HeightScale)
     {
         emitterData.Lod0BladeWidthScale = lod0WidthScale < 0.05f ? 0.05f : lod0WidthScale;
@@ -37,6 +42,10 @@ public:
     {
         emitterData.FieldInfluenceScale = scale < 0.0f ? 0.0f : scale;
     }
+    void SetLod0LeanGain(float gain)
+    {
+        emitterData.Lod0LeanGain = gain < 0.1f ? 0.1f : gain;
+    }
     void SetDebugNearestOriginTint(bool enabled)
     {
         emitterData.DebugNearestOriginTint = enabled ? 1.0f : 0.0f;
@@ -52,6 +61,7 @@ public:
     void SetWorldConstantsBuffer(const GBuffer* worldConstants) { worldConstantsBuffer = worldConstants; }
     const GBuffer* GetWorldConstantsBuffer() const { return worldConstantsBuffer; }
     const GDescriptor* GetGrassDescriptors() const { return &grassDescriptors; }
+    GTexture* GetGrassAtlasTexture() const { return Atlas.empty() ? nullptr : Atlas[0].get(); }
     const GBuffer* GetObjectPositionBuffer() const { return objectPositionBuffer.get(); }
 
 private:

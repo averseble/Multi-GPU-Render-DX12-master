@@ -62,79 +62,91 @@ cbuffer GrassEmitterData : register(b2)
     float WindMapFalloff;
     float FieldInfluenceScale;
     float DebugNearestOriginTint;
-    float2 Padding2;
+    float WindFluidEnable;
+    float WindFluidBlend;
+    float WindFluidPad0;
+    float Lod0LeanGain;
+    float4 WindFieldWorldParams;
     float4 WindOriginData[4];
     float4 WindDirectionData[4];
+    float4 WindFluidObstacleA;
+    float4 WindFluidObstacleB;
+}
+
+float2 WindRadialDirectionXZ(float2 offsXZ, float radius)
+{
+    const float dn = length(offsXZ);
+    const float eps = max(0.06f * max(radius, 1.0f), 0.5f);
+    if (dn <= eps)
+    {
+        // Near gust center avoid unstable normalize(0): use smoothed XY from fractional offset first.
+        if (dot(offsXZ, offsXZ) < 1e-8f)
+            return float2(1.0f, 0.0f);
+        return offsXZ / max(dn, 1e-4f); // radial cap already small
+    }
+    return offsXZ * rcp(dn);
 }
 
 float2 SampleWindGradient(float3 worldPos, float2 fallbackDir)
 {
-    float2 accum = float2(0.0f, 0.0f);
-    float wsum = 0.0f;
     uint count = min(WindOriginCount, 4u);
+    if (count == 0u)
+        return float2(0.0f, 0.0f);
+
+    float2 accum = float2(0.0f, 0.0f);
     [loop]
     for (uint i = 0u; i < count; ++i)
     {
         float3 origin = WindOriginData[i].xyz;
         float radius = max(1.0f, WindOriginData[i].w);
-        float2 dir = WindDirectionData[i].xy;
         float strength = max(0.0f, WindDirectionData[i].w);
-        float d = distance(worldPos.xz, origin.xz);
-        float t = saturate(1.0f - d / radius);
-        float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
-        if (dot(dir, dir) > 1e-6f && w > 1e-6f)
-        {
-            accum += normalize(dir) * w;
-            wsum += w;
-        }
+        float2 offs = worldPos.xz - origin.xz;
+        float d = length(offs);
+        if (strength <= 1e-8f)
+            continue;
+        // Falloff reaches 0 exactly at boundary; small hub uses stable direction above (no gigantic radius needed).
+        float radialMask = saturate(1.0f - d / max(radius, 1e-4f));
+        float2 packedDir = WindDirectionData[i].xy;
+        float dirLen = length(packedDir);
+        float dirBlend = dirLen > 1e-6f ? saturate(WindDirectionData[i].z) : 0.0f;
+        float2 radialDir = WindRadialDirectionXZ(offs, radius);
+        float2 directionalDir = dirLen > 1e-6f ? (packedDir / dirLen) : radialDir;
+        float directionalMask = 1.0f;
+        float mask = lerp(radialMask, directionalMask, dirBlend);
+        if (mask <= 1e-6f)
+            continue;
+        float radialWeight = pow(max(radialMask, 1e-5f), max(0.1f, WindMapFalloff)) * strength;
+        float directionalWeight = directionalMask * strength;
+        float w = lerp(radialWeight, directionalWeight, dirBlend);
+        float2 flowDir = lerp(radialDir, directionalDir, dirBlend);
+        flowDir = flowDir / max(length(flowDir), 1e-6f);
+        accum += flowDir * w;
     }
-    if (wsum > 1e-6f)
+    float lenA = length(accum);
+    if (lenA > 1e-8f)
     {
-        float2 dir = normalize(accum);
-        float mag = saturate(wsum / max(1.0f, float(count)));
+        float2 dir = accum * rcp(lenA);
+        // Keep raw falloff amplitude (was saturate(lenA) ~ always <1 mid-field); gustMag still clamps later on CPU path.
+        float mag = min(8.0f, lenA * 2.85f);
         return dir * mag;
     }
-    float2 d0 = fallbackDir;
-    if (dot(d0, d0) < 1e-6f) d0 = float2(1.0f, 0.0f);
-    return normalize(d0);
+    return float2(0.0f, 0.0f);
 }
 
+// Kept only for readability; LOD0 previously used nearest-origin vector which quantized badly with non-unit radials.
 float2 SampleNearestWindVector(float3 worldPos, float2 fallbackDir)
 {
-    uint count = min(WindOriginCount, 4u);
-    float bestMetric = 1e30f;
-    float2 bestVec = float2(0.0f, 0.0f);
-    [loop]
-    for (uint i = 0u; i < count; ++i)
-    {
-        float3 origin = WindOriginData[i].xyz;
-        float radius = max(1.0f, WindOriginData[i].w);
-        float2 dir = WindDirectionData[i].xy;
-        float strength = max(0.0f, WindDirectionData[i].w);
-        if (dot(dir, dir) < 1e-6f || strength <= 1e-6f)
-            continue;
-        float d = distance(worldPos.xz, origin.xz);
-        float nd = d / radius;
-        // Choose nearest by physical distance to avoid large-radius bias
-        // forcing one origin to dominate the entire field direction.
-        if (d < bestMetric)
-        {
-            bestMetric = d;
-            float t = saturate(1.0f - nd);
-            float w = pow(t, max(0.1f, WindMapFalloff)) * strength;
-            bestVec = normalize(dir) * w;
-        }
-    }
-    if (dot(bestVec, bestVec) > 1e-6f)
-    {
-        return bestVec;
-    }
     return SampleWindGradient(worldPos, fallbackDir);
 }
 
 uint FindNearestWindOriginIndex(float3 worldPos)
 {
     uint count = min(WindOriginCount, 4u);
+    if (count == 0u)
+        return 0u;
+    if (count <= 1u)
+        return 0u;
+
     float bestD = 1e30f;
     uint bestI = 0u;
     [loop]
@@ -173,7 +185,9 @@ struct GrassRenderVertex
     float3 Position;
     float Padding0;
     float2 TexCoord;
-    float2 ExtraData; // x = useTexture(0/1), y = bladeHeight01
+    float2 ExtraData;      // x = useTexture(0/1/2), y = bladeHeight01
+    float WindStress01;
+    float ExtraPad0;
 };
 
 StructuredBuffer<GrassData> GrassBuffer : register(t0);
@@ -282,22 +296,48 @@ GSOutput CreateQuadVertex(GSInput input, float2 offset, float2 uv, float windFac
     float bendFactor = saturate(offset.y);
     float bendProfile = bendFactor * bendFactor;
     float2 windVec = SampleWindGradient(input.WorldPos, WindDirection);
+    float gustMag = clamp(length(windVec) * FieldInfluenceScale, 0.0f, 6.0f);
+    float2 gustDir = (dot(windVec, windVec) > 1e-8f) ? normalize(windVec) : float2(0.0f, 0.0f);
+    float2 baseDir = WindDirection;
+    baseDir = (dot(baseDir, baseDir) > 1e-8f) ? normalize(baseDir) : float2(1.0f, 0.0f);
+    float2 windDir = (gustMag > 5e-3f) ? gustDir : baseDir;
+    float windSpeed01 = saturate(gustMag / 6.0f);
+
+    float3 worldWindOffset = float3(0.0f, 0.0f, 0.0f);
     if (useTexture < 0.5f)
     {
-        // LOD0: use nearest field vector for clear directional lay.
-        windVec = SampleNearestWindVector(input.WorldPos, WindDirection);
+        // LOD0: field-only lean toward ground — ignores intensity/amplitude/strength.
+        const float leanGain = max(Lod0LeanGain, 0.5f);
+        float lod0Gust = clamp(gustMag * leanGain, 0.18f * leanGain, 6.0f);
+        float windSpeed01 = saturate(lod0Gust / 6.0f);
+        float fieldOsc = sin(Time * 1.35f + input.WindOffset);
+        float leanDrive = lod0Gust * lerp(1.15f, 2.05f, windSpeed01);
+        leanDrive += abs(fieldOsc) * lod0Gust * 0.22f;
+        float directionalBend = leanDrive * width * 1.85f * bendProfile;
+        float bendCap = max(0.0f, height * lerp(1.05f, 2.05f, windSpeed01) * bendFactor);
+        directionalBend = min(directionalBend, bendCap);
+        worldWindOffset = float3(windDir.x, 0.0f, windDir.y) * directionalBend;
+        float groundLay = max(windSpeed01 * windSpeed01, 0.08f);
+        verticalOffset -= abs(directionalBend) * lerp(0.55f, 1.45f, windSpeed01) * bendProfile;
+        verticalOffset -= height * groundLay * bendProfile * lerp(0.70f, 1.25f, windSpeed01);
     }
-    float2 windDir = (dot(windVec, windVec) > 1e-6f) ? normalize(windVec) : float2(1.0f, 0.0f);
-    float windFieldStrength = clamp(length(windVec) * FieldInfluenceScale, 0.0f, 8.0f);
-    float ampScale = (useTexture > 0.5f) ? WindAmplitude : 1.0f;
-    // Keep a preferred wind direction but allow meaningful oscillation around it.
-    float directionalResponse = windFactor;
-    float staticLay = 0.9f * windFieldStrength; // strong steady lay toward local field
-    float directionalBend = (staticLay + directionalResponse) * WindStrength * ampScale * windFieldStrength * width * 1.6f * bendProfile;
-    // LOD0/LOD1 bend direction follows the vector field directly in world XZ.
-    float3 worldWindOffset = float3(windDir.x, 0.0f, windDir.y) * directionalBend;
-    // Natural blade arc: as wind bends the tip, it also slightly droops down.
-    verticalOffset -= abs(directionalBend) * 0.35f * bendProfile;
+    else
+    {
+        float ampScale = WindAmplitude;
+        float directionalResponse = windFactor;
+        float staticLay = 0.70f * gustMag;
+        float procAmbientScale = min(4.2f, WindIntensity * (0.30f + 0.12f * min(WindStrength, 4.0f)));
+        procAmbientScale *= saturate(gustMag * 0.45f);
+        float swayInfluence = min(6.5f, 0.80f * gustMag + procAmbientScale);
+        float dynamicSway = directionalResponse * (0.24f + 0.10f * gustMag);
+        float bendDrive = staticLay + dynamicSway;
+        bendDrive = max(staticLay * 0.10f, bendDrive);
+        float directionalBend = bendDrive * WindStrength * ampScale * swayInfluence * width * 1.15f * bendProfile;
+        const float bendCap = max(0.0f, height * 0.55f * bendFactor);
+        directionalBend = clamp(directionalBend, -bendCap, bendCap);
+        worldWindOffset = float3(windDir.x, 0.0f, windDir.y) * directionalBend;
+        verticalOffset -= abs(directionalBend) * 0.26f * bendProfile;
+    }
 
     float3 worldPos = input.WorldPos + rotatedRight * sideOffset + up * verticalOffset + worldWindOffset;
 #endif
@@ -331,18 +371,8 @@ void GS(point GSInput input[1], inout TriangleStream<GSOutput> triStream)
     float windFactor = forceSignal;
     if (useLod0)
     {
-        // Harmonic response of SDOF oscillator to sinusoidal forcing.
-        float wn = max(0.05f, Lod0SdofNaturalFreq);
-        float zeta = max(0.01f, Lod0SdofDampingRatio);
-        // LOD0 is decoupled from generic wind intensity.
-        forceOmega = 2.0f;
-        float num = wn * wn;
-        float denA = (wn * wn - forceOmega * forceOmega);
-        float denB = (2.0f * zeta * wn * forceOmega);
-        float gain = num / sqrt(max(1e-6f, denA * denA + denB * denB));
-        float phaseLag = atan2(denB, denA);
-        windFactor = sin(Time * forceOmega + windPhase - phaseLag) * gain;
-        // LOD0 uses SDOF response amplitude directly.
+        // LOD0 uses static field lean in CreateQuadVertex; no SDOF/intensity sway here.
+        windFactor = 0.0f;
     }
     float bladeWidthScale = useLod0 ? Lod0BladeWidthScale : Lod1BladeWidthScale;
     float bladeHeightScale = useLod0 ? Lod0BladeHeightScale : Lod1BladeHeightScale;
@@ -478,6 +508,7 @@ struct ExpandedVSOut
     float Alpha : ALPHA;
     float UseTexture : TEXCOORD1;
     float BladeHeight01 : TEXCOORD2;
+    float WindStress01 : TEXCOORD3;
 };
 
 ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
@@ -487,10 +518,6 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
     if (vertexID >= visibleVertexCount)
     {
         o.PositionH = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        o.TexCoord = float2(0.0f, 0.0f);
-        o.WorldPos = float3(0.0f, 0.0f, 0.0f);
-        o.Normal = float3(0.0f, 1.0f, 0.0f);
-        o.Alpha = 0.0f;
         return o;
     }
     GrassRenderVertex v = ExpandedGrassVertices[vertexID];
@@ -503,6 +530,7 @@ ExpandedVSOut VS_Expanded(uint vertexID : SV_VertexID)
     o.Alpha = 1.0f;
     o.UseTexture = v.ExtraData.x;
     o.BladeHeight01 = v.ExtraData.y;
+    o.WindStress01 = v.WindStress01;
     return o;
 }
 
@@ -529,5 +557,13 @@ float4 PS_Expanded(ExpandedVSOut input) : SV_Target
     float diff = max(0.3f, dot(input.Normal, -lightDir));
     float3 ambient = float3(0.2f, 0.2f, 0.2f);
     float3 lighting = ambient + diff;
-    return float4(color.rgb * lighting, color.a);
+    float3 outRgb = color.rgb * lighting;
+
+    float windStress = saturate(input.WindStress01);
+    float heightWeight = saturate(input.BladeHeight01);
+    float darken = windStress * lerp(0.45f, 1.0f, heightWeight);
+    outRgb *= lerp(1.0f, 0.62f, darken);
+    outRgb *= lerp(float3(1.0f, 1.0f, 1.0f), float3(0.58f, 0.74f, 0.52f), darken * 0.65f);
+
+    return float4(outRgb, color.a);
 }

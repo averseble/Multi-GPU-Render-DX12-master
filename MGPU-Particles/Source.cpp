@@ -1,5 +1,6 @@
 #include "HybridParticleApp.h"
 #include <cstring>
+#include <exception>
 using namespace Common;
 
 int WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -25,12 +26,16 @@ int WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE prevInstance,
             return 0;
 
         auto result = theApp.Run();
-
-        std::terminate();
+        return result;
     }
     catch (DxException& e)
     {
         MessageBox(nullptr, e.ToString().c_str(), L"HR Failed", MB_OK);
+        return 0;
+    }
+    catch (const std::exception& e)
+    {
+        MessageBoxA(nullptr, e.what(), "Error", MB_OK);
         return 0;
     }
 }

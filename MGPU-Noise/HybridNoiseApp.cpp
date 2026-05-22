@@ -976,7 +976,7 @@ void HybridNoiseApp::LoadStudyTexture()
     skyTex->SetName(L"skyTex");
     assets->AddTexture(skyTex);
 
-    auto grassTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\grass.dds", cmdList);
+    auto grassTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\grassBlades.dds", cmdList);
     grassTex->SetName(L"grassTex");
     assets->AddTexture(grassTex);
 

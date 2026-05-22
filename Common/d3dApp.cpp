@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "d3dApp.h"
 #include <WindowsX.h>
+#include <string>
 
 
 #include "GCommandQueue.h"
@@ -8,8 +9,9 @@
 #include "MemoryAllocator.h"
 #include "GDevice.h"
 #include "GDeviceFactory.h"
+#include "d3dUtil.h"
 
-using Microsoft::WRL::ComPtr;
+using PEPEngine::Utils::DxException;
 using namespace std;
 using namespace DirectX;
 
@@ -226,10 +228,22 @@ namespace Common
                 timer.Tick();
 
                 //if (!isAppPaused)
+                try
                 {
                     CalculateFrameStats();
                     Update(timer);
                     Draw(timer);
+                }
+                catch (const DxException& e)
+                {
+                    const std::wstring line =
+                        std::wstring(L"[D3DApp] Frame DxException: ") + e.ToString() + L"\n";
+                    OutputDebugStringW(line.c_str());
+#if defined(DEBUG) || defined(_DEBUG)
+                    MessageBoxW(nullptr, line.c_str(), L"MGPU-Particles · D3D12/DXGI", MB_ICONERROR | MB_OK);
+#endif
+                    PostQuitMessage(1);
+                    break;
                 }
                 //else
                 {
@@ -293,6 +307,21 @@ namespace Common
 
         if (pWindow)
         {
+            const auto safeOnResize = [this]()
+            {
+                try
+                {
+                    OnResize();
+                }
+                catch (const DxException& e)
+                {
+                    const std::wstring line =
+                        std::wstring(L"[D3DApp] OnResize DxException (do not throw through WndProc): ") +
+                        e.ToString() + L"\n";
+                    OutputDebugStringW(line.c_str());
+                }
+            };
+
             switch (msg)
             {
             // WM_ACTIVATE is sent when the window is activated or deactivated.  
@@ -334,7 +363,7 @@ namespace Common
                             isAppPaused = false;
                             isMinimized = false;
                             isMaximized = true;
-                            OnResize();
+                            safeOnResize();
                         }
                         else if (wParam == SIZE_RESTORED)
                         {
@@ -343,7 +372,7 @@ namespace Common
                             {
                                 isAppPaused = false;
                                 isMinimized = false;
-                                OnResize();
+                                safeOnResize();
                             }
 
                             // Restoring from maximized state?
@@ -351,7 +380,7 @@ namespace Common
                             {
                                 isAppPaused = false;
                                 isMaximized = false;
-                                OnResize();
+                                safeOnResize();
                             }
                             else if (isResizing)
                             {
@@ -366,7 +395,7 @@ namespace Common
                             }
                             else // API call such as SetWindowPos or swapChain->SetFullscreenState.
                             {
-                                OnResize();
+                                safeOnResize();
                             }
                         }
                     }
@@ -386,7 +415,7 @@ namespace Common
                 isAppPaused = false;
                 isResizing = false;
                 timer.Start();
-                OnResize();
+                safeOnResize();
                 return 0;
 
             // WM_DESTROY is sent when the window is being destroyed.

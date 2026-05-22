@@ -29,6 +29,7 @@ GrassEmitter::GrassEmitter(std::shared_ptr<GDevice> dev, uint32_t grassCount, fl
     emitterData.Lod1BladeCount = std::max(1u, lod1BladeCount);
     emitterData.WindDirection = Vector2(1.0f, 0.0f);
     emitterData.AtlasTextureCount = Atlas.size();
+    emitterData.Lod0LeanGain = 3.0f;
 
     Initialize();
 }
@@ -45,7 +46,7 @@ void GrassEmitter::Initialize()
         auto cmdList = queue->GetCommandList();
 
         // ��������� ��������� ������� �����
-        Atlas.push_back(GTexture::LoadTextureFromFile(L"Data\\Textures\\grass.dds", cmdList, TextureUsage::Albedo));
+        Atlas.push_back(GTexture::LoadTextureFromFile(L"Data\\Textures\\grassBlades.dds", cmdList, TextureUsage::Albedo));
 
 
         queue->WaitForFenceValue(queue->ExecuteCommandList(cmdList));
@@ -129,7 +130,7 @@ void GrassEmitter::CreateRootSignatures()
         computeSignature = std::make_shared<GRootSignature>();
         computeSignature->AddConstantBufferParameter(0); // b0 - GrassEmitterData
         computeSignature->AddDescriptorParameter(&uavRange, 1); // u0 - Grass buffer
-        computeSignature->Initialize(device);
+        computeSignature->Initialize(device, false, D3D12_ROOT_SIGNATURE_FLAG_NONE);
     }
 }
 
@@ -377,7 +378,13 @@ void GrassEmitter::SetWindGradient(uint32_t originCount, float falloff,
         if (directionData)
         {
             Vector2 dir(directionData[i].x, directionData[i].y);
-            if (dir.LengthSquared() < 1e-6f)
+            const float strengthPacked = std::max(0.0f, directionData[i].w);
+            const bool radialOnly = dir.LengthSquared() < 1e-12f;
+            if (radialOnly)
+            {
+                dir = Vector2::Zero;
+            }
+            else if (dir.LengthSquared() < 1e-6f)
             {
                 dir = Vector2(1.0f, 0.0f);
             }
@@ -386,7 +393,7 @@ void GrassEmitter::SetWindGradient(uint32_t originCount, float falloff,
                 dir.Normalize();
             }
             emitterData.WindDirectionData[i] = Vector4(
-                dir.x, dir.y, directionData[i].z, std::max(0.0f, directionData[i].w));
+                dir.x, dir.y, directionData[i].z, strengthPacked);
         }
     }
 }
