@@ -1,5 +1,7 @@
 # Multi-GPU Grass Simulation (DX12)
 
+<img width="426" height="240" alt="GrassFieldDemoGif" src="https://github.com/user-attachments/assets/408b4aaf-7d13-4f00-9cfc-66b44cdf1a80" />
+
 This repository section documents the grass simulation benchmark for single-GPU vs multi-GPU execution.
 
 ## Grass Performance Sweep (Single GPU vs Multi GPU)
@@ -23,4 +25,3 @@ Across all tested scenarios, multi-GPU outperformed single-GPU, with speedups fr
 2. Run: `MGPU-Particles.exe --perf-sweep`
 3. Read results from: `x64/Debug/grass-perf-sweep-results.csv` (or corresponding output folder for your build config).
 
-<img width="426" height="240" alt="GrassFieldDemoGif" src="https://github.com/user-attachments/assets/408b4aaf-7d13-4f00-9cfc-66b44cdf1a80" />
