@@ -84,8 +84,10 @@ protected:
     void InitImGui();
     void ShutdownImGui();
     void InitWindGradientPreviewTexture();
+    void EnsureWindGradientPreviewTexture();
     void ReleaseWindGradientPreviewTexture();
     void RefreshWindGradientPreviewTexture(const std::shared_ptr<GCommandList>& cmdList);
+    void AppendWindFluidPreviewReadbackIfDue(const std::shared_ptr<GCommandList>& cmdList);
     bool TryRebuildWindGradientPreviewFromSecondGpu(UINT8* uploadMappedBase);
     void EnsureWindFluidReadbackMatchesVelocity(ID3D12Resource* velocityTex);
 
@@ -232,6 +234,9 @@ protected:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT windFluidRbLayout_{};
     UINT64 windFluidRbTotalBytes_{0};
     UINT windFluidReadbackGrid_{0};
+    UINT64 windFluidReadbackFenceValue_{0};
+    bool windFluidReadbackQueued_{false};
+    std::vector<UINT8> windFluidReadbackCpu_;
     uint32_t windFluidGpuPreviewFrameCounter_{};
     bool windFluidGpuPreviewCacheValid_{false};
     std::vector<unsigned char> windFluidGpuPreviewCache_;
@@ -247,9 +252,9 @@ protected:
 
     bool imguiFontDescriptorInUse = false;
     std::string imguiIniFilePath;
-    float grassCullMaxDistance = 1800.0f;
-    float grassLod0Distance = 900.0f;
-    float grassLod1Distance = 1200.0f;
+    float grassCullMaxDistance = 18000.0f;
+    float grassLod0Distance = 9000.0f;
+    float grassLod1Distance = 12000.0f;
     int grassLod0BaseSegments = 4;
     int grassLod0BladeCount = 3;
     int grassLod1BladeCount = 1;
@@ -310,10 +315,13 @@ protected:
     float grassLod0DebugGradMax = 80.0f;
     int grassLod0DebugGradAxis = 0;
     int grassBladeCount = 5000;
-    float grassWorldSize = 200.0f;
+    float grassWorldSize = 2000.0f;
+    float grassFieldScaleXZ = 15.0f;
+    float grassFieldScaleY = 11.0f;
     std::shared_ptr<Transform> grassFieldTransform = nullptr;
     std::shared_ptr<Transform> platformTransform = nullptr;
     int pendingGrassBladeCount = -1;
+    float pendingGrassWorldSize = -1.0f;
     bool fpsLimitEnabled = true;
     int fpsLimitTarget = 60;
 

@@ -75,6 +75,7 @@ private:
     void DescriptorInitialize();
     void DescriptorInitializeExpandedDraw();
     /// Retries simulator init after ctor (e.g. if first attempt failed before shaders were reachable).
+    void EnsureSharedComputeResourcesInitialized();
     void EnsureWindFluidGpuInitialized();
     void EnsureExpandWindVelocitySnapshot();
     void ApplyLod0DebugGradientToEmitterData();
@@ -93,6 +94,8 @@ private:
     std::shared_ptr<GBuffer> visibleVertexCountBuffer;
     std::shared_ptr<GCrossAdapterResource> crossAdapterVisibleVertexCountBuffer;
     std::shared_ptr<GBuffer> primeVisibleVertexCountBuffer;
+    std::shared_ptr<GBuffer> sharedGrassEmitterCb_;
+    std::shared_ptr<GBuffer> sharedGrassCullCb_;
 
     GDescriptor computeDescriptors;
     GDescriptor expandDescriptors;
@@ -115,6 +118,7 @@ private:
     std::vector<GrassData> grassDataCPU;
 
     bool useSharedCompute = false;
+    bool sharedComputeResourcesInitialized_ = false;
     bool needRegenerate = true;
 
     enum Status : short

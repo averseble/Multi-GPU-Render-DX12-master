@@ -51,18 +51,18 @@ namespace
         if (fence->GetCompletedValue() >= value)
             return;
 
-        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!ev)
-            return;
-
-        if (FAILED(fence->SetEventOnCompletion(value, ev)))
+        static HANDLE s_completionEvent = nullptr;
+        if (!s_completionEvent)
         {
-            CloseHandle(ev);
-            return;
+            s_completionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!s_completionEvent)
+                return;
         }
 
-        WaitForSingleObject(ev, INFINITE);
-        CloseHandle(ev);
+        if (FAILED(fence->SetEventOnCompletion(value, s_completionEvent)))
+            return;
+
+        WaitForSingleObject(s_completionEvent, INFINITE);
     }
 
     // Matches `SampleWindGradient` in GrassDraw.hlsl / ComputeGrass.hlsl:
@@ -387,6 +387,7 @@ HybridParticleApp::HybridParticleApp(const HINSTANCE hInstance): D3DApp(hInstanc
 
 HybridParticleApp::~HybridParticleApp()
 {
+    Flush();
     ShutdownImGui();
 }
 
@@ -446,6 +447,21 @@ void HybridParticleApp::Update(const GameTimer& gt)
             emitter->SetGrassCount(static_cast<uint32_t>(pendingGrassBladeCount));
         }
         pendingGrassBladeCount = -1;
+    }
+
+    if (pendingGrassWorldSize > 0.0f)
+    {
+        Flush();
+        for (auto* emitter : crossGrassEmitters)
+        {
+            emitter->SetWorldSize(pendingGrassWorldSize);
+        }
+        pendingGrassWorldSize = -1.0f;
+    }
+
+    if (grassFieldTransform)
+    {
+        grassFieldTransform->SetScale(Vector3(grassFieldScaleXZ, grassFieldScaleY, grassFieldScaleXZ));
     }
 
     float fieldCenterX = 0.0f;
@@ -852,10 +868,19 @@ void HybridParticleApp::Draw(const GameTimer& gt)
             emitter->Dispatch(cmdList);
         }
 
+        if (showWindFieldDebug && windPreviewLiveGpuReadback_)
+            AppendWindFluidPreviewReadbackIfDue(cmdList);
+
         cmdList->EndQuery(timestampHeapIndex + 1);
         cmdList->ResolveQuery(timestampHeapIndex, 2, timestampHeapIndex * sizeof(UINT64));
 
         currentFrameResource->ComputeFenceValue = computeQueue->ExecuteCommandList(cmdList);
+
+        if (windFluidReadbackQueued_)
+        {
+            windFluidReadbackFenceValue_ = currentFrameResource->ComputeFenceValue;
+            windFluidReadbackQueued_ = false;
+        }
 
         if (useCrossGpuPath)
         {
@@ -943,7 +968,7 @@ bool HybridParticleApp::Initialize()
     Flush();
 
     InitImGui();
-    InitWindGradientPreviewTexture();
+    // Wind debug preview texture is created on first use (see EnsureWindGradientPreviewTexture).
 
     return true;
 }
@@ -1157,10 +1182,11 @@ void HybridParticleApp::InitPipeLineResource()
     const D3D12_INPUT_LAYOUT_DESC desc = {defaultInputLayout.data(), defaultInputLayout.size()};
 
     defaultPrimePipelineResources = RenderModeFactory();
-    defaultPrimePipelineResources.LoadDefaultShaders();
+    defaultPrimePipelineResources.LoadDefaultShaders(/*includeOptionalContent=*/false);
     defaultPrimePipelineResources.LoadDefaultPSO(primeDevice, primeDeviceSignature, desc,
                                                  BackBufferFormat, DepthStencilFormat, ssaoPrimeRootSignature,
-                                                 NormalMapFormat, AmbientMapFormat);
+                                                 NormalMapFormat, AmbientMapFormat,
+                                                 /*includeOptionalContent=*/false);
 
     ambientPrimePath->SetPipelineData(*defaultPrimePipelineResources.GetPSO(RenderMode::Ssao),
                                       *defaultPrimePipelineResources.GetPSO(RenderMode::SsaoBlur));
@@ -1236,67 +1262,24 @@ void HybridParticleApp::LoadStudyTexture()
 
     const auto cmdList = queue->GetCommandList();
 
-    auto bricksTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\bricks2.dds", cmdList);
-    bricksTex->SetName(L"bricksTex");
-    assets->AddTexture(bricksTex);
-
-    auto stoneTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\stone.dds", cmdList);
-    stoneTex->SetName(L"stoneTex");
-    assets->AddTexture(stoneTex);
-
-    auto tileTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\tile.dds", cmdList);
-    tileTex->SetName(L"tileTex");
-    assets->AddTexture(tileTex);
-
-    auto fenceTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\WireFence.dds", cmdList);
-    fenceTex->SetName(L"fenceTex");
-    assets->AddTexture(fenceTex);
-
-    auto waterTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\water1.dds", cmdList);
-    waterTex->SetName(L"waterTex");
-    assets->AddTexture(waterTex);
-
+    // Default scene only: skybox, ground quad material, default normal map.
+    // Grass loads its own atlas in GrassEmitter. Other study textures are omitted for faster startup.
     auto skyTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\skymap.dds", cmdList);
     skyTex->SetName(L"skyTex");
     assets->AddTexture(skyTex);
-
-    auto grassTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\grassBlades.dds", cmdList);
-    grassTex->SetName(L"grassTex");
-    assets->AddTexture(grassTex);
-
-    auto treeArrayTex = GTexture::LoadTextureFromFile(L"Data\\Textures\\treeArray2.dds", cmdList);
-    treeArrayTex->SetName(L"treeArrayTex");
-    assets->AddTexture(treeArrayTex);
 
     auto seamless = GTexture::LoadTextureFromFile(L"Data\\Textures\\seamless_grass.jpg", cmdList);
     seamless->SetName(L"seamless");
     assets->AddTexture(seamless);
 
-
-    std::vector<std::wstring> texNormalNames =
-    {
-        L"bricksNormalMap",
-        L"tileNormalMap",
-        L"defaultNormalMap"
-    };
-
-    std::vector<std::wstring> texNormalFilenames =
-    {
-        L"Data\\Textures\\bricks2_nmap.dds",
-        L"Data\\Textures\\tile_nmap.dds",
-        L"Data\\Textures\\default_nmap.dds"
-    };
-
-    for (int j = 0; j < texNormalNames.size(); ++j)
-    {
-        auto texture = GTexture::LoadTextureFromFile(texNormalFilenames[j], cmdList, TextureUsage::Normalmap);
-        texture->SetName(texNormalNames[j]);
-        assets->AddTexture(texture);
-    }
+    auto defaultNormalMap = GTexture::LoadTextureFromFile(
+        L"Data\\Textures\\default_nmap.dds", cmdList, TextureUsage::Normalmap);
+    defaultNormalMap->SetName(L"defaultNormalMap");
+    assets->AddTexture(defaultNormalMap);
 
     queue->WaitForFenceValue(queue->ExecuteCommandList(cmdList));
 
-    logQueue.Push(std::wstring(L"\nLoad DDS Texture"));
+    logQueue.Push(std::wstring(L"\nLoad DDS Texture (minimal set)"));
 }
 
 void HybridParticleApp::LoadModels()
@@ -1304,23 +1287,7 @@ void HybridParticleApp::LoadModels()
     auto queue = primeDevice->GetCommandQueue(GQueueType::Compute);
     const auto cmdList = queue->GetCommandList();
 
-     auto nano = assets->CreateModelFromFile(cmdList, "Data\\Objects\\Nanosuit\\Nanosuit.obj");
-     models[L"nano"] = std::move(nano);
-
-    auto atlas = assets->CreateModelFromFile(cmdList, "Data\\Objects\\Atlas\\Atlas.obj");
-    models[L"atlas"] = std::move(atlas);
-    auto pbody = assets->CreateModelFromFile(cmdList, "Data\\Objects\\P-Body\\P-Body.obj");
-    models[L"pbody"] = std::move(pbody);
-
-    auto griffon = assets->CreateModelFromFile(cmdList, "Data\\Objects\\Griffon\\Griffon.FBX");
-    griffon->scaleMatrix = Matrix::CreateScale(0.1);
-    models[L"griffon"] = std::move(griffon);
-
-    auto mountDragon = assets->CreateModelFromFile(
-        cmdList, "Data\\Objects\\MOUNTAIN_DRAGON\\MOUNTAIN_DRAGON.FBX");
-    mountDragon->scaleMatrix = Matrix::CreateScale(0.1);
-    models[L"mountDragon"] = std::move(mountDragon);
-
+    // Default scene only (see CreateGO). Uncomment others when enabling benchmark / temple props.
     auto desertDragon = assets->CreateModelFromFile(
         cmdList, "Data\\Objects\\DesertDragon\\DesertDragon.FBX");
     desertDragon->scaleMatrix = Matrix::CreateScale(0.1);
@@ -1332,29 +1299,14 @@ void HybridParticleApp::LoadModels()
     auto quad = assets->GenerateQuad(cmdList);
     models[L"quad"] = std::move(quad);
 
-    auto stair = assets->CreateModelFromFile(
-        cmdList, "Data\\Objects\\Temple\\SM_AsianCastle_A.FBX");
-    models[L"stair"] = std::move(stair);
-
-    auto columns = assets->CreateModelFromFile(
-        cmdList, "Data\\Objects\\Temple\\SM_AsianCastle_E.FBX");
-    models[L"columns"] = std::move(columns);
-
-    auto fountain = assets->
-        CreateModelFromFile(cmdList, "Data\\Objects\\Temple\\SM_Fountain.FBX");
-    models[L"fountain"] = std::move(fountain);
-
     auto platform = assets->CreateModelFromFile(
         cmdList, "Data\\Objects\\Temple\\SM_PlatformSquare.FBX");
     models[L"platform"] = std::move(platform);
 
-    auto doom = assets->CreateModelFromFile(cmdList, "Data\\Objects\\DoomSlayer\\doommarine.obj");
-    models[L"doom"] = std::move(doom);
-
     queue->WaitForFenceValue(queue->ExecuteCommandList(cmdList));
     queue->Flush();
 
-    logQueue.Push(std::wstring(L"\nLoad Models Data"));
+    logQueue.Push(std::wstring(L"\nLoad Models Data (minimal set)"));
 }
 
 void HybridParticleApp::MipMasGenerate()
@@ -1528,7 +1480,7 @@ void HybridParticleApp::CreateGO()
     auto grassField = std::make_unique<GameObject>("Grass Field");
     grassFieldTransform = grassField->GetTransform();
     grassFieldTransform->SetPosition(Vector3(0, 0, 0));
-    grassFieldTransform->SetScale(Vector3(15.0f, 11.0f, 15.0f));
+    grassFieldTransform->SetScale(Vector3(grassFieldScaleXZ, grassFieldScaleY, grassFieldScaleXZ));
     auto grassEmitter = std::make_shared<CrossAdapterGrassEmitter>(primeDevice, secondDevice,
                                                                    static_cast<uint32_t>(grassBladeCount), grassWorldSize,
                                                                    static_cast<uint32_t>(grassLod0BladeCount),
@@ -1540,7 +1492,7 @@ void HybridParticleApp::CreateGO()
 
      auto platform = std::make_unique<GameObject>();
      platformTransform = platform->GetTransform();
-     platformTransform->SetScale(Vector3(2.3, 2, 2.1f));
+     platformTransform->SetScale(Vector3(23.3, 2, 21.1f));
      platformTransform->SetPosition(Vector3(1500, 0, 100));
      auto renderer = std::make_shared<ModelRenderer>(primeDevice, models[L"platform"]);
      platform->AddComponent(renderer);
@@ -1550,7 +1502,7 @@ void HybridParticleApp::CreateGO()
 
     auto camera = std::make_unique<GameObject>("MainCamera");
     //camera->GetTransform()->SetParent(rotater->GetTransform().get());
-    camera->AddComponent(std::make_shared<CameraController>());
+    camera->AddComponent(std::make_shared<CameraController>(60.0f, 25.0f, 18.0f));
     camera->GetTransform()->SetEulerRotate(Vector3(-30, 270, 0));
     camera->GetTransform()->SetPosition(Vector3(-500, 190, -32));
     camera->AddComponent(std::make_shared<Camera>(AspectRatio()));
@@ -2321,14 +2273,15 @@ void HybridParticleApp::ShutdownImGui()
     if (!imguiInitialized)
         return;
 
+    Flush();
+    ReleaseWindGradientPreviewTexture();
+
     if (!imguiIniFilePath.empty())
     {
         ImGui::SaveIniSettingsToDisk(imguiIniFilePath.c_str());
     }
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
-
-    ReleaseWindGradientPreviewTexture();
 
     ImGui::DestroyContext();
     imguiSrvDescriptors = GDescriptor();
@@ -2413,6 +2366,13 @@ bool HybridParticleApp::TryPickGrassGroundFromMouse(const int clientX, const int
     return true;
 }
 
+void HybridParticleApp::EnsureWindGradientPreviewTexture()
+{
+    if (windGradientPreviewReady)
+        return;
+    InitWindGradientPreviewTexture();
+}
+
 void HybridParticleApp::InitWindGradientPreviewTexture()
 {
     windGradientPreviewReady = false;
@@ -2491,6 +2451,9 @@ void HybridParticleApp::ReleaseWindGradientPreviewTexture()
     windFluidReadbackGrid_ = 0;
     windFluidRbTotalBytes_ = 0;
     windFluidRbLayout_ = {};
+    windFluidReadbackFenceValue_ = 0;
+    windFluidReadbackQueued_ = false;
+    windFluidReadbackCpu_.clear();
     windFluidGpuPreviewCacheValid_ = false;
     windFluidGpuPreviewCache_.clear();
     windFluidGpuPreviewFrameCounter_ = 0;
@@ -2544,6 +2507,48 @@ void HybridParticleApp::EnsureWindFluidReadbackMatchesVelocity(ID3D12Resource* v
         windFluidRbTotalBytes_ = 0;
         windFluidRbLayout_ = {};
     }
+    else
+    {
+        windFluidReadbackFenceValue_ = 0;
+        windFluidReadbackCpu_.clear();
+    }
+}
+
+void HybridParticleApp::AppendWindFluidPreviewReadbackIfDue(const std::shared_ptr<GCommandList>& cmdList)
+{
+    if (!cmdList || !UseCrossAdapter || !secondDevice || crossGrassEmitters.empty() ||
+        crossGrassEmitters[0] == nullptr)
+        return;
+
+    CrossAdapterGrassEmitter* emitter = crossGrassEmitters[0];
+    if (!emitter->IsCrossAdapterSharedComputeActive() || !emitter->IsWindFluidGpuReady())
+        return;
+
+    const uint32_t intervalFrames = (windPreviewMode_ == 2) ? 20u : 8u;
+    if ((++windFluidGpuPreviewFrameCounter_ % intervalFrames) != 0u)
+        return;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> vel = emitter->GetExpandWindVelocityResource();
+    if (!vel)
+        return;
+
+    EnsureWindFluidReadbackMatchesVelocity(vel.Get());
+    if (!windFluidReadbackSecond_ || windFluidRbTotalBytes_ == 0)
+        return;
+
+    cmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->FlushResourceBarriers();
+
+    CD3DX12_TEXTURE_COPY_LOCATION dstRb(windFluidReadbackSecond_.Get(), windFluidRbLayout_);
+    CD3DX12_TEXTURE_COPY_LOCATION srcVel(vel.Get(), 0u);
+    cmdList->GetGraphicsCommandList()->CopyTextureRegion(&dstRb, 0, 0, 0, &srcVel, nullptr);
+
+    cmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COMMON);
+    cmdList->FlushResourceBarriers();
+
+    windFluidReadbackQueued_ = true;
 }
 
 bool HybridParticleApp::TryRebuildWindGradientPreviewFromSecondGpu(UINT8* mapped)
@@ -2551,7 +2556,6 @@ bool HybridParticleApp::TryRebuildWindGradientPreviewFromSecondGpu(UINT8* mapped
     if (!mapped || !secondDevice || crossGrassEmitters.empty() || crossGrassEmitters[0] == nullptr)
         return false;
 
-    const uint32_t kGpuFluidPreviewIntervalFrames = (windPreviewMode_ == 2) ? 20u : 8u;
     const size_t cacheBytes =
         static_cast<size_t>(windGradientPreviewRowPitch) * static_cast<size_t>(windGradientPreviewH);
 
@@ -2559,62 +2563,47 @@ bool HybridParticleApp::TryRebuildWindGradientPreviewFromSecondGpu(UINT8* mapped
     if (!emitter->IsCrossAdapterSharedComputeActive() || !emitter->IsWindFluidGpuReady())
         return false;
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> vel = emitter->GetExpandWindVelocityResource();
-    if (!vel)
-        vel = emitter->GetWindFluid().GetVelocityResource();
-    if (!vel)
-        return false;
-
-    EnsureWindFluidReadbackMatchesVelocity(vel.Get());
     if (!windFluidReadbackSecond_ || windFluidRbTotalBytes_ == 0)
         return false;
 
-    const bool throttleSkip =
-        (++windFluidGpuPreviewFrameCounter_ % kGpuFluidPreviewIntervalFrames) != 0u &&
-        windFluidGpuPreviewCacheValid_ && windFluidGpuPreviewCache_.size() == cacheBytes;
-
-    if (throttleSkip)
+    if (windFluidGpuPreviewCacheValid_ && windFluidGpuPreviewCache_.size() == cacheBytes)
     {
-        std::memcpy(mapped, windFluidGpuPreviewCache_.data(), cacheBytes);
-        return true;
+        const auto computeQueue = secondDevice->GetCommandQueue(GQueueType::Compute);
+        const ComPtr<ID3D12Fence> fence = computeQueue ? computeQueue->GetFence() : nullptr;
+        if (!fence || fence->GetCompletedValue() < windFluidReadbackFenceValue_)
+        {
+            std::memcpy(mapped, windFluidGpuPreviewCache_.data(), cacheBytes);
+            return true;
+        }
     }
 
-    if (UseCrossAdapter && secondComputeFence)
-        WaitForSharedFenceValueCpu(secondComputeFence, sharedComputeFenceValue);
-
-    auto computeQueue = secondDevice->GetCommandQueue(GQueueType::Compute);
-
-    try
-    {
-        const auto rdCmdList = computeQueue->GetCommandList();
-
-        rdCmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        rdCmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COPY_DEST);
-        rdCmdList->FlushResourceBarriers();
-
-        CD3DX12_TEXTURE_COPY_LOCATION dstRb(windFluidReadbackSecond_.Get(), windFluidRbLayout_);
-        CD3DX12_TEXTURE_COPY_LOCATION srcVel(vel.Get(), 0u);
-        rdCmdList->GetGraphicsCommandList()->CopyTextureRegion(&dstRb, 0, 0, 0, &srcVel, nullptr);
-
-        rdCmdList->TransitionBarrier(vel, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        rdCmdList->TransitionBarrier(windFluidReadbackSecond_, D3D12_RESOURCE_STATE_COMMON);
-        rdCmdList->FlushResourceBarriers();
-
-        const uint64_t copyFenceValue = computeQueue->ExecuteCommandList(rdCmdList);
-        WaitForSharedFenceValueCpu(computeQueue->GetFence(), copyFenceValue);
-    }
-    catch (...)
-    {
+    if (windFluidReadbackFenceValue_ == 0)
         return false;
-    }
+
+    const auto computeQueue = secondDevice->GetCommandQueue(GQueueType::Compute);
+    if (!computeQueue)
+        return false;
+
+    WaitForSharedFenceValueCpu(computeQueue->GetFence(), windFluidReadbackFenceValue_);
 
     BYTE* mappedReadback = nullptr;
     if (FAILED(windFluidReadbackSecond_->Map(0u, nullptr, reinterpret_cast<void**>(&mappedReadback))))
+    {
+        if (windFluidGpuPreviewCacheValid_ && windFluidGpuPreviewCache_.size() == cacheBytes)
+        {
+            std::memcpy(mapped, windFluidGpuPreviewCache_.data(), cacheBytes);
+            return true;
+        }
         return false;
+    }
 
     const UINT rbPitchBytes = windFluidRbLayout_.Footprint.RowPitch;
     const UINT8* fluidRows =
         reinterpret_cast<const UINT8*>(mappedReadback) + windFluidRbLayout_.Offset;
+
+    if (windFluidReadbackCpu_.size() != windFluidRbTotalBytes_)
+        windFluidReadbackCpu_.resize(static_cast<size_t>(windFluidRbTotalBytes_));
+    std::memcpy(windFluidReadbackCpu_.data(), mappedReadback, static_cast<size_t>(windFluidRbTotalBytes_));
 
     const size_t dyeSize = static_cast<size_t>(windGradientPreviewW) * static_cast<size_t>(windGradientPreviewH);
     if (windPreviewDye_.size() != dyeSize)
@@ -2824,6 +2813,9 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
 
     cmdList->SetDescriptorsHeap(&imguiSrvDescriptors);
 
+    if (showWindFieldDebug)
+        EnsureWindGradientPreviewTexture();
+
     if (windGradientPreviewReady && showWindFieldDebug)
         RefreshWindGradientPreviewTexture(cmdList);
 
@@ -2879,6 +2871,35 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         {
             ImGui::TextDisabled("Cross-adapter GPU fences: on (automatic shared fences)");
         }
+
+        ImGui::SeparatorText("Grass field");
+        ImGui::SliderInt("Blade count (density)", &grassBladeCount, 500, 500000);
+        ImGui::SliderFloat("Patch world size", &grassWorldSize, 100.0f, 8000.0f, "%.0f");
+        ImGui::SliderFloat("Field scale XZ", &grassFieldScaleXZ, 1.0f, 40.0f, "%.1f");
+        ImGui::SliderFloat("Field scale Y", &grassFieldScaleY, 1.0f, 40.0f, "%.1f");
+        {
+            const float spanXZ = std::max(grassWorldSize, 1.0f) * std::max(grassFieldScaleXZ, 0.1f);
+            const float patchArea = spanXZ * spanXZ;
+            const float bladesPerSqUnit = static_cast<float>(std::max(1, grassBladeCount)) / patchArea;
+            ImGui::TextDisabled("Effective span ~%.0f x %.0f world units", spanXZ, spanXZ);
+            ImGui::TextDisabled("Density ~%.4f blades / world unit²", bladesPerSqUnit);
+        }
+        ImGui::SliderInt("LOD0 blades per tuft", &grassLod0BladeCount, 1, 4);
+        ImGui::SliderInt("LOD1 blades per tuft", &grassLod1BladeCount, 1, 4);
+        ImGui::SliderFloat("LOD0 blade width", &grassLod0BladeWidthScale, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderFloat("LOD0 blade height", &grassLod0BladeHeightScale, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderFloat("LOD1 blade width", &grassLod1BladeWidthScale, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderFloat("LOD1 blade height", &grassLod1BladeHeightScale, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderInt("LOD0 base segments", &grassLod0BaseSegments, 2, 8);
+        ImGui::SliderFloat("Wind tessellation scale", &grassWindTessellationScale, 1.0f, 8.0f, "%.1f");
+        if (ImGui::Button("Apply field size / density"))
+        {
+            pendingGrassWorldSize = std::max(1.0f, grassWorldSize);
+            pendingGrassBladeCount = std::max(1, grassBladeCount);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Rebuilds grass buffers (can hitch).");
+
         ImGui::SeparatorText("Flow forcing");
         ImGui::TextDisabled("Base wind is constant directional flow; LMB adds radial disturbances.");
         ImGui::SliderFloat("Base flow strength", &grassWindBaseStrength, 0.0f, 2.0f, "%.2f");
@@ -2951,7 +2972,7 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         ImGui::SliderFloat("LOD0 max distance", &grassLod0Distance, 50.0f, grassCullMaxDistance, "%.0f");
         ImGui::SliderFloat("LOD1 max distance", &grassLod1Distance, grassLod0Distance, grassCullMaxDistance,
                            "%.0f");
-        ImGui::SliderFloat("Cull max distance", &grassCullMaxDistance, 200.0f, 4000.0f, "%.0f");
+        ImGui::SliderFloat("Cull max distance", &grassCullMaxDistance, 200.0f, 40000.0f, "%.0f");
         ImGui::SeparatorText("LOD0 debug linear gradient");
         ImGui::Checkbox("Use linear gradient (bypass fluid texture)", &grassLod0DebugGradient);
         if (grassLod0DebugGradient)
@@ -3101,15 +3122,13 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
         UINT debugFluidPitch = 0;
         UINT debugFluidGrid = 0;
         const bool gpuDebugEligible =
-            windGradientPreviewShowsGpuFluid_ && windFluidReadbackSecond_ &&
+            windGradientPreviewShowsGpuFluid_ && !windFluidReadbackCpu_.empty() &&
             windFluidReadbackGrid_ > 0 && windFluidRbLayout_.Footprint.RowPitch > 0;
-        BYTE* debugMappedPtr = nullptr;
-        if (gpuDebugEligible &&
-            SUCCEEDED(windFluidReadbackSecond_->Map(0u, nullptr, reinterpret_cast<void**>(&debugMappedPtr))))
+        if (gpuDebugEligible)
         {
             mappedFluidForDebug = true;
             debugFluidRows =
-                reinterpret_cast<const UINT8*>(debugMappedPtr) + windFluidRbLayout_.Offset;
+                windFluidReadbackCpu_.data() + windFluidRbLayout_.Offset;
             debugFluidPitch = windFluidRbLayout_.Footprint.RowPitch;
             debugFluidGrid = windFluidReadbackGrid_;
         }
@@ -3227,8 +3246,6 @@ void HybridParticleApp::DrawImGui(const std::shared_ptr<GCommandList>& cmdList)
             }
         }
         dl->AddText(ImVec2(20.0f, 20.0f), IM_COL32(80, 220, 255, 255), "Wind field debug: ON");
-        if (mappedFluidForDebug)
-            windFluidReadbackSecond_->Unmap(0u, nullptr);
     }
 
     ImGui::Render();

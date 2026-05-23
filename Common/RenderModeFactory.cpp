@@ -16,7 +16,7 @@ void RenderModeFactory::LoadDefaultPSO(std::shared_ptr<GDevice> device, std::sha
                                        D3D12_INPUT_LAYOUT_DESC defautlInputDesc, DXGI_FORMAT backBufferFormat,
                                        DXGI_FORMAT depthStencilFormat,
                                        std::shared_ptr<GRootSignature> ssaoRootSignature, DXGI_FORMAT normalMapFormat,
-                                       DXGI_FORMAT ambientMapFormat)
+                                       DXGI_FORMAT ambientMapFormat, bool includeOptionalContent)
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC basePsoDesc;
 
@@ -137,16 +137,19 @@ void RenderModeFactory::LoadDefaultPSO(std::shared_ptr<GDevice> device, std::sha
 
 
     auto noisePSO = std::make_shared<GraphicPSO>( RenderMode::Debug);
-    noisePSO->SetPsoDesc(basePsoDesc);
-    noisePSO->SetShader(shaders["noiseVS"].get());
-    noisePSO->SetShader(shaders["noisePS"].get());
-    noisePSO->SetSampleCount(1);
-    noisePSO->SetSampleQuality(0);
-    noisePSO->SetDSVFormat(DXGI_FORMAT_UNKNOWN);
-    depthStencilDesc = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    depthStencilDesc.DepthEnable = false;
-    depthStencilDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    noisePSO->SetDepthStencilState(depthStencilDesc);
+    if (includeOptionalContent)
+    {
+        noisePSO->SetPsoDesc(basePsoDesc);
+        noisePSO->SetShader(shaders["noiseVS"].get());
+        noisePSO->SetShader(shaders["noisePS"].get());
+        noisePSO->SetSampleCount(1);
+        noisePSO->SetSampleQuality(0);
+        noisePSO->SetDSVFormat(DXGI_FORMAT_UNKNOWN);
+        depthStencilDesc = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        depthStencilDesc.DepthEnable = false;
+        depthStencilDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        noisePSO->SetDepthStencilState(depthStencilDesc);
+    }
 
 
     auto uiPSO = std::make_shared<GraphicPSO>( RenderMode::UI);
@@ -203,7 +206,8 @@ void RenderModeFactory::LoadDefaultPSO(std::shared_ptr<GDevice> device, std::sha
     PSO[ssaoBlurPSO->GetRenderMode()] = std::move(ssaoBlurPSO);
     PSO[debugPso->GetRenderMode()] = std::move(debugPso);
     PSO[quadPso->GetRenderMode()] = std::move(quadPso);
-    PSO[noisePSO->GetRenderMode()] = std::move(noisePSO);
+    if (includeOptionalContent)
+        PSO[noisePSO->GetRenderMode()] = std::move(noisePSO);
     PSO[uiPSO->GetRenderMode()] = std::move(uiPSO);
 
     for (auto& pso : PSO)
@@ -212,7 +216,7 @@ void RenderModeFactory::LoadDefaultPSO(std::shared_ptr<GDevice> device, std::sha
     }
 }
 
-void RenderModeFactory::LoadDefaultShaders() const
+void RenderModeFactory::LoadDefaultShaders(bool includeOptionalContent) const
 {
     if (shaders.size() > 0) return;
 
@@ -246,12 +250,15 @@ void RenderModeFactory::LoadDefaultShaders() const
     shaders["SkyBoxPixel"] = std::move(
         std::make_shared<GShader>(L"Shaders\\SkyBoxShader.hlsl", PixelShader, defines, "SKYMAP_PS", "ps_5_1"));
 
-    shaders["treeSpriteVS"] = std::move(
-        std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", VertexShader, nullptr, "VS", "vs_5_1"));
-    shaders["treeSpriteGS"] = std::move(
-        std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", GeometryShader, nullptr, "GS", "gs_5_1"));
-    shaders["treeSpritePS"] = std::move(
-        std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", PixelShader, alphaTestDefines, "PS", "ps_5_1"));
+    if (includeOptionalContent)
+    {
+        shaders["treeSpriteVS"] = std::move(
+            std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", VertexShader, nullptr, "VS", "vs_5_1"));
+        shaders["treeSpriteGS"] = std::move(
+            std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", GeometryShader, nullptr, "GS", "gs_5_1"));
+        shaders["treeSpritePS"] = std::move(
+            std::make_shared<GShader>(L"Shaders\\TreeSprite.hlsl", PixelShader, alphaTestDefines, "PS", "ps_5_1"));
+    }
 
 
     shaders["drawNormalsVS"] = std::move(
@@ -277,10 +284,13 @@ void RenderModeFactory::LoadDefaultShaders() const
     shaders["quadPS"] = std::move(
         std::make_shared<GShader>(L"Shaders\\Quad.hlsl", PixelShader, nullptr, "PS", "ps_5_1"));
 
-    shaders["noiseVS"] = std::move(
-        std::make_shared<GShader>(L"Shaders\\NoiseDraw.hlsl", VertexShader, nullptr, "VS", "vs_5_1"));
-    shaders["noisePS"] = std::move(
-        std::make_shared<GShader>(L"Shaders\\NoiseDraw.hlsl", PixelShader, nullptr, "PS", "ps_5_1"));
+    if (includeOptionalContent)
+    {
+        shaders["noiseVS"] = std::move(
+            std::make_shared<GShader>(L"Shaders\\NoiseDraw.hlsl", VertexShader, nullptr, "VS", "vs_5_1"));
+        shaders["noisePS"] = std::move(
+            std::make_shared<GShader>(L"Shaders\\NoiseDraw.hlsl", PixelShader, nullptr, "PS", "ps_5_1"));
+    }
 
     for (auto&& pair : shaders)
     {

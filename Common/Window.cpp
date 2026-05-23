@@ -16,6 +16,8 @@ namespace Common
 {
     LRESULT CALLBACK WndProc(const HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam)
     {
+        if (!D3DApp::HasActiveApp())
+            return DefWindowProc(hwnd, msg, wParam, lParam);
         return D3DApp::GetApp().MsgProc(hwnd, msg, wParam, lParam);
     }
 
@@ -41,6 +43,18 @@ namespace Common
         }
 
         backBuffers.clear();
+    }
+
+    void Window::DetachNativeWindow()
+    {
+        swapChain.Reset();
+        swapChain = nullptr;
+        for (auto&& back_buffer : backBuffers)
+        {
+            back_buffer.Reset();
+        }
+        backBuffers.clear();
+        hWnd = nullptr;
     }
 
 

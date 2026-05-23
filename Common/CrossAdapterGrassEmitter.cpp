@@ -82,14 +82,6 @@ CrossAdapterGrassEmitter::CrossAdapterGrassEmitter(std::shared_ptr<GDevice> prim
     primeGrassEmitter = std::make_shared<GrassEmitter>(
         primeDevice, grassCount, worldSize, emitterData.Lod0BladeCount, emitterData.Lod1BladeCount);
 
-    windFluid.Initialize(secondDevice, windFluidGridResolution_);
-
-    InitPSO(secondDevice);
-    CreateBuffers();
-    DescriptorInitialize();
-    DescriptorInitializeExpandedDraw();
-    GenerateGrassDataCPU();
-
     cullData.MaxDistance = 1800.0f;
     cullData.Lod0Distance = 900.0f;
     cullData.Lod1Distance = 1200.0f;
@@ -402,6 +394,20 @@ void CrossAdapterGrassEmitter::DescriptorInitializeExpandedDraw()
         &counterSrv, &expandedDrawDescriptors, 2);
 }
 
+void CrossAdapterGrassEmitter::EnsureSharedComputeResourcesInitialized()
+{
+    if (sharedComputeResourcesInitialized_)
+        return;
+
+    InitPSO(secondDevice);
+    CreateBuffers();
+    DescriptorInitialize();
+    DescriptorInitializeExpandedDraw();
+    GenerateGrassDataCPU();
+    sharedComputeResourcesInitialized_ = true;
+    needRegenerate = true;
+}
+
 void CrossAdapterGrassEmitter::EnsureWindFluidGpuInitialized()
 {
     if (windFluid.IsInitialized())
@@ -555,7 +561,7 @@ void CrossAdapterGrassEmitter::Update()
 
 void CrossAdapterGrassEmitter::Draw(const std::shared_ptr<GCommandList>& cmdList)
 {
-    if (useSharedCompute)
+    if (useSharedCompute && sharedComputeResourcesInitialized_)
     {
         auto& expandedOnPrime = crossAdapterExpandedVertexBuffer->GetPrimeResource();
         auto& counterOnPrime = crossAdapterVisibleVertexCountBuffer->GetPrimeResource();
@@ -589,9 +595,12 @@ void CrossAdapterGrassEmitter::Draw(const std::shared_ptr<GCommandList>& cmdList
 
 void CrossAdapterGrassEmitter::Dispatch(const std::shared_ptr<GCommandList>& cmdList)
 {
+    if (useSharedCompute)
+        EnsureSharedComputeResourcesInitialized();
+
     if (dirtyActivated == Enable)
     {
-        if (needRegenerate)
+        if (needRegenerate && sharedComputeResourcesInitialized_ && crossAdapterGrassBuffer && grassBuffer)
         {
             cmdList->CopyResource(grassBuffer->GetD3D12Resource(),
                 crossAdapterGrassBuffer->GetSharedResource().GetD3D12Resource());
@@ -616,8 +625,15 @@ void CrossAdapterGrassEmitter::Dispatch(const std::shared_ptr<GCommandList>& cmd
             d3dUtil::CalcConstantBufferByteSize(static_cast<UINT>(sizeof(GrassEmitterData)));
         const UINT grassCullCbBytes =
             d3dUtil::CalcConstantBufferByteSize(static_cast<UINT>(sizeof(GrassCullData)));
-        auto constantBuffer = std::make_shared<GBuffer>(secondDevice, grassEmitterCbBytes, 1, L"Grass Emitter Constant");
-        auto cullBuffer = std::make_shared<GBuffer>(secondDevice, grassCullCbBytes, 1, L"Grass Cull Constant");
+        if (!sharedGrassEmitterCb_)
+        {
+            sharedGrassEmitterCb_ =
+                std::make_shared<GBuffer>(secondDevice, grassEmitterCbBytes, 1, L"Grass Emitter Constant");
+            sharedGrassCullCb_ =
+                std::make_shared<GBuffer>(secondDevice, grassCullCbBytes, 1, L"Grass Cull Constant");
+        }
+        const auto& constantBuffer = sharedGrassEmitterCb_;
+        const auto& cullBuffer = sharedGrassCullCb_;
 
         const bool gpuFluidLive =
             windFluid.IsInitialized() && (emitterData.WindFluidEnable >= 0.5f);
@@ -1040,10 +1056,14 @@ void CrossAdapterGrassEmitter::SetGrassCount(uint32_t count)
     emitterData.GridSize = static_cast<uint32_t>(std::sqrt(static_cast<float>(count)));
     primeGrassEmitter->SetGrassCount(count);
     windFluidInitGiveUp_ = false;
-    CreateBuffers();
-    DescriptorInitialize();
-    DescriptorInitializeExpandedDraw();
-    GenerateGrassDataCPU();
+    if (useSharedCompute)
+    {
+        EnsureSharedComputeResourcesInitialized();
+        CreateBuffers();
+        DescriptorInitialize();
+        DescriptorInitializeExpandedDraw();
+        GenerateGrassDataCPU();
+    }
     needRegenerate = true;
 }
 

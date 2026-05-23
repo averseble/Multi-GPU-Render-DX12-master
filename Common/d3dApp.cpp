@@ -29,6 +29,8 @@ namespace Common
     LRESULT CALLBACK
     MainWndProc(const HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam)
     {
+        if (!D3DApp::HasActiveApp())
+            return DefWindowProc(hwnd, msg, wParam, lParam);
         return D3DApp::GetApp().MsgProc(hwnd, msg, wParam, lParam);
     }
 
@@ -89,6 +91,16 @@ namespace Common
     D3DApp::~D3DApp()
     {
         Flush();
+
+        if (MainWindow)
+            MainWindow->Destroy();
+
+        gs_Windows.clear();
+        gs_WindowByName.clear();
+        MainWindow.reset();
+
+        if (instance == this)
+            instance = nullptr;
     }
 
     void D3DApp::Destroy()
@@ -422,6 +434,8 @@ namespace Common
             case WM_DESTROY:
 
                 Flush();
+
+                pWindow->DetachNativeWindow();
 
             // If a window is being destroyed, remove it from the 
             // window maps.

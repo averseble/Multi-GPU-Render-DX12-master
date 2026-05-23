@@ -76,6 +76,7 @@ namespace Common
         GameTimer* GetTimer();
 
         static D3DApp& GetApp();
+        static bool HasActiveApp() { return instance != nullptr; }
 
         HINSTANCE AppInst() const;
         std::shared_ptr<Window> MainWnd() const;

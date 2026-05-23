@@ -64,6 +64,8 @@ const GResource& GCrossAdapterResource::GetPrimeResource() const
 
 const GResource& GCrossAdapterResource::GetSharedResource() const
 {
+    if (!sharedResource)
+        ThrowIfFailed(E_POINTER);
     return *sharedResource;
 }
 

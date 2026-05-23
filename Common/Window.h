@@ -59,6 +59,9 @@ namespace Common
 
         void SetWindowTitle(const std::wstring& text) const;
 
+        /// Called from WM_DESTROY after the OS has begun destroying the HWND (do not call DestroyWindow).
+        void DetachNativeWindow();
+
     protected:
         friend class D3DApp;
 
