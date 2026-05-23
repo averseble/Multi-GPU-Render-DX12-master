@@ -22,6 +22,5 @@ Across all tested scenarios, multi-GPU outperformed single-GPU, with speedups fr
 1. Build `MGPU-Particles` (`Debug|x64` or `Release|x64`).
 2. Run: `MGPU-Particles.exe --perf-sweep`
 3. Read results from: `x64/Debug/grass-perf-sweep-results.csv` (or corresponding output folder for your build config).
-   [Матвеев Преддиплом.pdf](https://github.com/user-attachments/files/28179307/default.pdf)
 
 <img width="426" height="240" alt="GrassFieldDemoGif" src="https://github.com/user-attachments/assets/408b4aaf-7d13-4f00-9cfc-66b44cdf1a80" />
