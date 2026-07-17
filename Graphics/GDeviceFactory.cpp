@@ -74,7 +74,7 @@ namespace PEPEngine::Graphics
             auto adapter = adapters[i];
 
             auto device = std::make_shared<GDevice>(adapter);
-            device->Initialize();
+            device->Initialize(device);
             devices.emplace_back(device);
         }
 
@@ -155,7 +155,7 @@ namespace PEPEngine::Graphics
                 ComPtr<IDXGIAdapter3> adapter3;
                 ThrowIfFailed(adapter->QueryInterface(IID_PPV_ARGS(&adapter3)));
                 wrapDevice = (std::make_shared<GDevice>(adapter3));
-                wrapDevice->Initialize();
+                wrapDevice->Initialize(wrapDevice);
             }
         }
 

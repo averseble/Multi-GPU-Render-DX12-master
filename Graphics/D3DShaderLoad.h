@@ -162,10 +162,31 @@ namespace PEPEngine::Graphics
         hr = D3DCompileFromFile(resolved.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE,
                                 entrypoint.c_str(), target.c_str(), compileFlags, 0, &byteCode, &errors);
 
+        std::string errorText;
         if (errors != nullptr)
-            OutputDebugStringA(static_cast<char*>(errors->GetBufferPointer()));
+        {
+            errorText.assign(static_cast<char*>(errors->GetBufferPointer()),
+                             errors->GetBufferSize());
+            OutputDebugStringA(errorText.c_str());
+        }
 
-        ThrowIfFailed(hr);
+        if (FAILED(hr))
+        {
+            std::wstring message = L"D3DCompileFromFile failed\nrequested: " + filename +
+                L"\nresolved: " + resolved +
+                L"\nentry: " + AnsiToWString(entrypoint) +
+                L"\ntarget: " + AnsiToWString(target);
+            if (!errorText.empty())
+            {
+                message += L"\n\ncompiler output:\n" + AnsiToWString(errorText);
+            }
+            else
+            {
+                message += L"\n\n(no compiler output — usually file not found or include path failed)";
+                message += L"\ncwd: " + std::filesystem::current_path().wstring();
+            }
+            throw DxException(hr, L"D3DCompileFromFile", AnsiToWString(__FILE__), __LINE__, message);
+        }
 
         return byteCode;
     }

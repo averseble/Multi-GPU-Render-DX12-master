@@ -41,7 +41,7 @@ void PS(VertexOut pin)
     diffuseAlbedo *= texturesMaps[diffuseMapIndex].Sample(gsamAnisotropicWrap, pin.TexC);
 
 #ifdef ALPHA_TEST
-   
+
     clip(diffuseAlbedo.a - 0.3f);
 #endif
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <memory>
 #include <d3d12.h>
 #include <wrl/client.h>
 #include "dxgi1_6.h"
@@ -27,7 +28,7 @@ namespace PEPEngine::Graphics
         Count
     };
 
-    class GDevice : std::enable_shared_from_this<GDevice>
+    class GDevice
     {
         ComPtr<ID3D12Device> device;
         ComPtr<IDXGIAdapter3> adapter;
@@ -51,9 +52,9 @@ namespace PEPEngine::Graphics
         friend GDeviceFactory;
 
 
-        void InitialDescriptorAllocator();
-        void InitialCommandQueue();
-        void InitialQueryTimeStamp();
+        void InitialDescriptorAllocator(const std::shared_ptr<GDevice>& self);
+        void InitialCommandQueue(const std::shared_ptr<GDevice>& self);
+        void InitialQueryTimeStamp(const std::shared_ptr<GDevice>& self);
         void InitialDevice();
 
         bool isInitialized = false;
@@ -63,7 +64,7 @@ namespace PEPEngine::Graphics
         ~GDevice();
 
         bool IsInitialized() const {return isInitialized;}
-        void Initialize();
+        void Initialize(const std::shared_ptr<GDevice>& self);
         
         HANDLE SharedHandle(const ComPtr<ID3D12DeviceChild>& deviceObject, const SECURITY_ATTRIBUTES* attributes,
                             DWORD access,

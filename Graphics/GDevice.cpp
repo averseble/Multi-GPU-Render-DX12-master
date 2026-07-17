@@ -98,25 +98,24 @@ namespace PEPEngine::Graphics
     }
 
 
-    void GDevice::InitialCommandQueue()
+    void GDevice::InitialCommandQueue(const std::shared_ptr<GDevice>& self)
     {
-        auto Device = std::shared_ptr<GDevice>(this);
         for (UINT i = 0; i != static_cast<UINT>(GQueueType::Count); ++i)
         {
-            queues[i] = std::make_shared<GCommandQueue>(Device, GQueueTypeToCommandListType(static_cast<GQueueType>(i)));
+            queues[i] = std::make_shared<GCommandQueue>(self, GQueueTypeToCommandListType(static_cast<GQueueType>(i)));
         }
     }
 
-    void GDevice::InitialQueryTimeStamp()
+    void GDevice::InitialQueryTimeStamp(const std::shared_ptr<GDevice>& self)
     {
         // Two timestamps for each frame.
         constexpr UINT resultCount = 2 * globalCountFrameResources;
         constexpr UINT resultBufferSize = resultCount * sizeof(UINT64);
 
-        timestampResultBuffer = Lazy<GResource>([resultBufferSize, this]
+        timestampResultBuffer = Lazy<GResource>([resultBufferSize, self]
         {
-            return GResource(std::shared_ptr<GDevice>(this), CD3DX12_RESOURCE_DESC::Buffer(resultBufferSize),
-                             name + L" TimestampBuffer", nullptr, D3D12_RESOURCE_STATE_COPY_DEST,
+            return GResource(self, CD3DX12_RESOURCE_DESC::Buffer(resultBufferSize),
+                             self->GetName() + L" TimestampBuffer", nullptr, D3D12_RESOURCE_STATE_COPY_DEST,
                              CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK));
         });
 
@@ -166,12 +165,11 @@ namespace PEPEngine::Graphics
         }
     }
 
-    void GDevice::InitialDescriptorAllocator()
+    void GDevice::InitialDescriptorAllocator(const std::shared_ptr<GDevice>& self)
     {
-        auto Device = std::shared_ptr<GDevice>(this);
         for (UINT i = 0; i != D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; ++i)
         {
-            graphicAllocators[i] = std::make_shared<GAllocator>(Device,
+            graphicAllocators[i] = std::make_shared<GAllocator>(self,
                                                                 static_cast<D3D12_DESCRIPTOR_HEAP_TYPE>(i));
         }
     }
@@ -200,9 +198,11 @@ namespace PEPEngine::Graphics
         ComPtr<ID3D12InfoQueue> pInfoQueue;
         if (SUCCEEDED(device.As(&pInfoQueue)))
         {
+            // Break only on corruption. Break-on-WARNING/ERROR aborts the process when
+            // launched without a debugger (looks like a silent close during asset load).
             ThrowIfFailed(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE));
-            ThrowIfFailed(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE));
-            ThrowIfFailed(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE));
+            ThrowIfFailed(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE));
+            ThrowIfFailed(pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE));
 
 
             // Suppress messages based on their severity level
@@ -234,17 +234,17 @@ namespace PEPEngine::Graphics
 #endif
     }
 
-    void GDevice::Initialize()
+    void GDevice::Initialize(const std::shared_ptr<GDevice>& self)
     {
         if (isInitialized) return;
 
         InitialDevice();
 
-        InitialCommandQueue();
+        InitialCommandQueue(self);
 
-        InitialQueryTimeStamp();
+        InitialQueryTimeStamp(self);
 
-        InitialDescriptorAllocator();
+        InitialDescriptorAllocator(self);
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
         ThrowIfFailed(
@@ -268,13 +268,20 @@ namespace PEPEngine::Graphics
 
     GDevice::~GDevice()
     {
-        Flush();
+        if (!isInitialized)
+            return;
+
+        // Drain GPU work first, then stop worker threads. Flush after HardStop can hang
+        // forever if the executor thread already exited with in-flight lists remaining.
+        try
+        {
+            Flush();
+        }
+        catch (...)
+        {
+        }
 
         TerminatedQueuesWorker();
-        for (auto&& queue : queues)
-        {
-            queue->Flush();
-        }
     }
 
 

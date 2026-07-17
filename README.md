@@ -73,11 +73,11 @@ git submodule update --init --recursive
 
 # 2. Открыть DX12.sln в Visual Studio
 # 3. Restore NuGet packages (ПКМ по решению → Restore NuGet Packages)
-# 4. Собрать проект MGPU-Particles (Debug|x64 или Release|x64)
+# 4. Собрать проект **MGPU-GrassSim** (Debug|x64 или Release|x64)
 # 5. Скопировать папки Data и Shaders в каталог с .exe (если post-build не сработал)
 ```
 
-> Демо травы живёт в проекте **`MGPU-Particles`** (историческое имя сэмпла в базовом репозитории).
+> Демо травы — проект **`MGPU-GrassSim`**. **`MGPU-Particles`** — отдельный сэмпл shared particle system из базового репозитория.
 
 ---
 
@@ -85,9 +85,9 @@ git submodule update --init --recursive
 
 | Режим | Команда |
 |-------|---------|
-| Интерактивное демо | `MGPU-Particles.exe` |
-| Один прогон бенчмарка | `MGPU-Particles.exe --perf-test` |
-| Полный sweep (5 сценариев) | `MGPU-Particles.exe --perf-sweep` |
+| Интерактивное демо | `MGPU-GrassSim.exe` |
+| Один прогон бенчмарка | `MGPU-GrassSim.exe --perf-test` |
+| Полный sweep (5 сценариев) | `MGPU-GrassSim.exe --perf-sweep` |
 
 Результаты sweep: `grass-perf-sweep-results.csv` в рабочей директории exe.
 
@@ -119,8 +119,8 @@ Common/
   CrossAdapterGrassEmitter.{h,cpp}   # multi-GPU grass pipeline
   WindFluidSimulator.{h,cpp}         # GPU wind simulation
   GrassEmitter.{h,cpp}             # grass data & LOD
-MGPU-Particles/
-  HybridParticleApp.{h,cpp}          # demo app, ImGui, benchmarks
+MGPU-GrassSim/
+  HybridGrassSimApp.{h,cpp}          # demo app, ImGui, benchmarks
   Shaders/
     ComputeGrass.hlsl              # expand, cull, wind sampling
     GrassDraw.hlsl                 # LOD0 tessellation + LOD1 billboards
@@ -147,6 +147,6 @@ Grass simulation, wind fluid, LOD pipeline, benchmarks и документаци
 
 Built on top of [Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12). Original repo provides the multi-GPU framework; **this fork adds** grass rendering, GPU Navier–Stokes wind, LOD system, ImGui tooling, and automated single vs multi-GPU benchmarks (~**2.14x** mean speedup).
 
-**Build:** clone with submodules → open `DX12.sln` → build **`MGPU-Particles`** → run `MGPU-Particles.exe` or `--perf-sweep` for benchmarks.
+**Build:** clone with submodules → open `DX12.sln` → build **`MGPU-GrassSim`** → run `MGPU-GrassSim.exe` or `--perf-sweep` for benchmarks.
 
 **Contact:** [github.com/averseble](https://github.com/averseble)

@@ -8,7 +8,7 @@ RWStructuredBuffer<ParticleData> ParticlesPool : register(u0);
 //#define SIMULATION
 
 #ifdef INJECTION
-ConsumeStructuredBuffer<uint>		DeadParticles	: register(u1);
+ConsumeStructuredBuffer<uint> DeadParticles : register(u1);
 AppendStructuredBuffer<uint> AliveParticles : register(u2);
 RWStructuredBuffer<ParticleData> InjectionParticles : register(u3);
 #endif
@@ -28,32 +28,32 @@ void CS(uint3 groupID : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
 #ifdef INJECTION
 
-	 uint threadParticleIndex = groupID.x * THREAD_GROUP_TOTAL + groupID.y * EmitterBuffer.InjectGroupCount * THREAD_GROUP_TOTAL + groupIndex;
+    uint threadParticleIndex = groupID.x * THREAD_GROUP_TOTAL + groupID.y * EmitterBuffer.InjectGroupCount * THREAD_GROUP_TOTAL + groupIndex;
 
-	
+
     [flatten]
     if (threadParticleIndex >= EmitterBuffer.ParticleInjectCount)
         return;
-    	
+
     uint particleIndex = DeadParticles.Consume();
     ParticleData injectParticle = InjectionParticles.Load(threadParticleIndex);
-    ParticlesPool[particleIndex] = injectParticle;    	
+    ParticlesPool[particleIndex] = injectParticle;
     AliveParticles.Append(particleIndex);
-	return;
+    return;
 #endif
 
 #ifdef SIMULATION
 
-	 uint threadParticleIndex = groupID.x * THREAD_GROUP_TOTAL
-	+ groupID.y * EmitterBuffer.SimulatedGroupCount * THREAD_GROUP_TOTAL + groupIndex;
+    uint threadParticleIndex = groupID.x * THREAD_GROUP_TOTAL
+        + groupID.y * EmitterBuffer.SimulatedGroupCount * THREAD_GROUP_TOTAL + groupIndex;
 
-	
+
     [flatten]
     if (threadParticleIndex >= EmitterBuffer.ParticleAliveCount)
         return;
-	
+
     uint aliveIndex = AliveParticles.Load(threadParticleIndex);
-	
+
     ParticleData particle = ParticlesPool.Load(aliveIndex);
 
     particle.LifeTime -= EmitterBuffer.DeltaTime;
@@ -67,12 +67,12 @@ void CS(uint3 groupID : SV_GroupID, uint groupIndex : SV_GroupIndex)
     }
 
     float percent = particle.LifeTime / particle.TotalLifeTime;
-	    
+
     particle.TextureIndex = floor((1 - percent) * EmitterBuffer.AtlasTextureCount);
-	
+
     particle.Velocity += EmitterBuffer.Force * EmitterBuffer.DeltaTime;
     particle.Position += particle.Velocity * EmitterBuffer.DeltaTime;
 
-	ParticlesPool[aliveIndex] = particle;
+    ParticlesPool[aliveIndex] = particle;
 #endif
 }

@@ -122,6 +122,8 @@ namespace PEPEngine::Graphics
 
     void GCommandQueue::Signal(const ComPtr<ID3D12Fence>& otherFence, const UINT64 fenceValue) const
     {
+        if (!commandQueue)
+            return;
         commandQueue->Signal(otherFence.Get(), fenceValue);
     }
 
@@ -287,7 +289,16 @@ namespace PEPEngine::Graphics
         if (IsExecutorAlive)
         {
             IsExecutorAlive = false;
-            CommandListExecutorThread.join();
+            CommandListExecutorCondition.notify_all();
+            if (CommandListExecutorThread.joinable())
+                CommandListExecutorThread.join();
+        }
+
+        // Drop any leftover lists so a late Flush cannot wait forever.
+        CommandListEntry entry;
+        while (m_InFlightCommandLists.TryPop(entry))
+        {
+            entry.commandList.reset();
         }
     }
 
