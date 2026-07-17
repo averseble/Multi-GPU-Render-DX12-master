@@ -590,4 +590,53 @@ references/*
 !**/Data/
 
 **LogData*.txt
-**.txt
+**/imgui.ini
+**/imgui-settings.ini
+**/grass-perf-sweep-results.csv
+SharedParticle*.txt
+
+# --- Project-specific: local / generated artifacts ---
+/tools/
+
+# Shader & GPU debug output
+*.cso
+*.dxbc
+*.pdb
+*.dmp
+*.rdc
+*.nvdbg
+*.nvuser
+
+# MSBuild extras (not always caught by rules above)
+*.tlog
+*.lastbuildstate
+*.iobj
+*.ipdb
+*.idb
+*.ilk
+*.exp
+*.recipe
+*.*proj.FileListAbsolute.txt
+*.metagen
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.cursor/
+*.blend1
+*.blend2
+
+# Python (local scripts)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# NuGet restore output (keep packages.config)
+**/packages/*
+!**/packages/build/
+*.nuget.props
+*.nuget.targets
