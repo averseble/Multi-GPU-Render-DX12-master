@@ -1,152 +1,192 @@
-# Multi-GPU Grass Rendering — Master's Thesis (DirectX 12)
+# MGPU Grass
 
-<img width="426" height="240" alt="Grass field demo" src="https://github.com/user-attachments/assets/408b4aaf-7d13-4f00-9cfc-66b44cdf1a80" />
+**July 2026** · Author: [Matvei Matveev](https://github.com/averseble)
 
-**Author:** [Matvey Matveev](https://github.com/averseble)  
-**Type:** Master's thesis implementation — real-time grass field with hybrid single-GPU / multi-GPU pipeline  
-**Stack:** C++17 · HLSL · DirectX 12 · ImGui
+A DirectX 12 research harness for large-scale grass — hybrid single-GPU / multi-GPU paths, GPU wind, and automated performance sweeps.
 
-> **English summary below** — scroll to [English](#english)
+![Grass field demo](https://github.com/user-attachments/assets/408b4aaf-7d13-4f00-9cfc-66b44cdf1a80)
+
+[NOTICE.md](NOTICE.md) · [CONTRIBUTIONS.md](CONTRIBUTIONS.md) · [Architecture](docs/ARCHITECTURE.md)
 
 ---
 
-## О проекте
+## Introduction
 
-Дипломная работа по real-time рендерингу больших травяных полей в DirectX 12 с распределением нагрузки между **дискретной GPU (dGPU)** и **интегрированной GPU (iGPU)** через cross-adapter ресурсы.
+MGPU Grass is a master's thesis project: a real-time grass field built to study how far a hybrid multi-adapter pipeline can push dense vegetation under measurable budgets.
 
-Демо собрано на базе multi-GPU фреймворка [Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12) (Mikhanil). В оригинальном репозитории реализованы алгоритмы Shared Shadow Map, Shared UI Blending, Shared Particle System и Shared Hybrid Compute. **В этом форке — собственная исследовательская часть:** система травы, симуляция ветра и бенчмарк single-GPU vs multi-GPU.
+It runs on top of [Mikhanil/Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12) — a multi-GPU DX12 / PEPEngine sample framework (devices, queues, cross-adapter resources, shared-resource demos). This fork adds the grass system, wind simulation, research UI, and a CLI benchmark tool that turns “it feels faster” into CSV.
 
-### Что реализовано автором
+The demo project is **`MGPU-GrassSim`**. Upstream sample apps (e.g. `MGPU-Particles`) remain in the tree for reference.
 
-| Компонент | Описание |
-|-----------|----------|
-| **CrossAdapterGrassEmitter** | Гибридный пайплайн: expand + frustum culling на второй GPU, отрисовка на primary |
-| **LOD-система** | Billboard LOD1 / tessellated blades LOD0 с отдельными параметрами плотности и размера |
-| **WindFluidSimulator** | GPU Navier–Stokes (stable fluids): inject → advect → divergence → pressure → project |
-| **Wind gradient field** | Несколько источников ветра с falloff и превью поля в ImGui |
-| **Second-order dynamics (LOD0)** | Физически мотивированный отклик травинок на ветер |
-| **ImGui-панели** | Runtime-настройка LOD, ветра, препятствий, FPS limiter, статистика адаптеров |
-| **Performance sweep** | Автоматический прогон 5 сценариев нагрузки, CSV-отчёт, сравнение режимов |
+---
 
-### Архитектура (multi-GPU)
+## Features
+
+- **Hybrid grass pipeline** — expand + frustum / distance LOD culling on a secondary GPU; draw on the primary via cross-adapter buffers
+- **LOD model** — tessellated LOD0 blades + camera-facing LOD1 billboards, with separate density / scale controls
+- **GPU wind** — Navier–Stokes stable-fluids field (inject → advect → divergence → pressure → project) plus multi-origin wind gradients
+- **Research UI (ImGui)** — runtime toggles for single/multi-GPU, LOD, wind, obstacles, FPS limiter, adapter stats
+- **Performance tooling** — `--perf-test` and `--perf-sweep` write reproducible CSV comparisons across load scenarios
+- **Measured gains** — about **1.80×–2.48×** multi-GPU speedup across sweep scenarios (**~2.14×** mean)
+
+---
+
+## Pipeline overview
+
+Each frame, grass goes through three stages:
+
+1. **Wind** (secondary GPU, compute) — optional fluid / gradient field update  
+2. **Expand + cull** (secondary GPU, compute) — instance expansion, frustum cull, LOD pick, wind response  
+3. **Draw** (primary GPU, graphics) — LOD0 tessellation + LOD1 billboards in the main lighting path  
 
 ```mermaid
 flowchart LR
-    subgraph Primary["Primary GPU (render)"]
+    subgraph Primary["Primary GPU"]
         SM[Shadow / SSAO / Scene]
         GR[Grass draw LOD0/LOD1]
     end
-
-    subgraph Secondary["Secondary GPU (compute)"]
+    subgraph Secondary["Secondary GPU"]
         EXP[Grass expand + cull]
-        WF[Navier-Stokes wind sim]
+        WF[Navier-Stokes wind]
     end
-
     EXP -->|cross-adapter buffers| GR
     WF -->|velocity SRV| EXP
     SM --> GR
 ```
 
-Подробнее: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
-## Требования
+## Multi-GPU grass path
 
-- Windows 10/11, **Visual Studio 2019+** (toolset v142+)
-- **Windows SDK 10.0.19041** или новее
-- **2 GPU** — dGPU + iGPU (или две дискретные; нужен cross-adapter)
-- Интернет для NuGet restore
-- Git с поддержкой submodules
+The core class is `Common/CrossAdapterGrassEmitter`. `EnableShared()` turns on the cross-adapter path; single-GPU mode keeps expand and draw on the same adapter so comparisons stay honest.
+
+| Stage | File |
+|-------|------|
+| Expand / cull / wind sample | `MGPU-GrassSim/Shaders/ComputeGrass.hlsl` |
+| LOD0 tessellation + LOD1 billboards | `MGPU-GrassSim/Shaders/GrassDraw.hlsl` |
 
 ---
 
-## Сборка
+## Performance sweep (the tools angle)
 
-```powershell
-# 1. Клонировать с submodules
-git clone --recurse-submodules https://github.com/averseble/Multi-GPU-Render-DX12-master.git
-cd Multi-GPU-Render-DX12-master
+| Flag | Behavior |
+|------|----------|
+| *(none)* | Interactive demo + ImGui |
+| `--perf-test` | One timed scenario → `grass-perf-results.csv` |
+| `--perf-sweep` | Five load scenarios → `grass-perf-sweep-results.csv` |
 
-# Если уже склонировано без submodules:
-git submodule update --init --recursive
+### Sweep results
 
-# 2. Открыть DX12.sln в Visual Studio
-# 3. Restore NuGet packages (ПКМ по решению → Restore NuGet Packages)
-# 4. Собрать проект **MGPU-GrassSim** (Debug|x64 или Release|x64)
-# 5. Скопировать папки Data и Shaders в каталог с .exe (если post-build не сработал)
+| Scenario | Single FPS | Multi FPS | Speedup |
+|---|---:|---:|---:|
+| baseline_mixed_lod | 49.27 | 88.82 | 1.80× |
+| lod0_heavy | 44.67 | 92.75 | 2.08× |
+| lod1_favoring | 43.92 | 81.08 | 1.85× |
+| dense_mixed | 20.50 | 50.92 | 2.48× |
+| ultra_dense_lod0_heavy | 13.25 | 32.69 | 2.47× |
+| **Mean** | **34.32** | **69.25** | **2.14×** |
+
+Numbers come from the automated sweep, not from hand-picked captures.
+
+---
+
+## Wind simulation
+
+`WindFluidSimulator` is a classic GPU stable-fluids solver on a 2D grid (default 256×256):
+
+| Pass | Shader |
+|------|--------|
+| Inject | `WindFluidInject.hlsl` |
+| Advect | `WindFluidAdvect.hlsl` |
+| Divergence | `WindFluidDivergence.hlsl` |
+| Pressure | `WindFluidPressure.hlsl` |
+| Project | `WindFluidProject.hlsl` |
+
+LOD0 blades use a second-order response to the field; LOD1 uses a cheaper displacement. ImGui exposes origins, falloff, and a field preview so iteration does not require a rebuild.
+
+---
+
+## 1. How to run (execution environment)
+
+**Environment:** Windows 10/11 (x64) · two GPUs recommended for multi-adapter · Visual Studio 2019/2022 (v142+) · Windows SDK 10.0.19041+ · NuGet · git submodules.
+
+**Build from source**
+
+1. `git clone --recurse-submodules https://github.com/averseble/Multi-GPU-Render-DX12-master.git`
+2. Open `DX12.sln` → Restore NuGet packages
+3. Build **MGPU-GrassSim** (`Release|x64` recommended)
+4. Ensure `Data/` and `Shaders/` sit next to `MGPU-GrassSim.exe`
+
+**Run**
+
+```text
+MGPU-GrassSim.exe              # interactive
+MGPU-GrassSim.exe --perf-test  # one scenario → grass-perf-results.csv
+MGPU-GrassSim.exe --perf-sweep # five scenarios → grass-perf-sweep-results.csv
 ```
 
-> Демо травы — проект **`MGPU-GrassSim`**. **`MGPU-Particles`** — отдельный сэмпл shared particle system из базового репозитория.
+ImGui (interactive): Single/Multi GPU, LOD, wind, adapter stats, FPS limiter.  
+If the exe does not start in a reviewer environment, use the screen-capture video in the submission package.
 
 ---
 
-## Запуск
+## 2. Biggest challenge
 
-| Режим | Команда |
-|-------|---------|
-| Интерактивное демо | `MGPU-GrassSim.exe` |
-| Один прогон бенчмарка | `MGPU-GrassSim.exe --perf-test` |
-| Полный sweep (5 сценариев) | `MGPU-GrassSim.exe --perf-sweep` |
-
-Результаты sweep: `grass-perf-sweep-results.csv` в рабочей директории exe.
-
-В ImGui можно переключать **Single GPU / Multi GPU**, менять плотность травы, параметры ветра и LOD.
+Making the hybrid grass path correct under multi-adapter constraints: owning which GPU runs which stage, keeping world-space / LOD / wind data coherent across adapters, and turning that into a fair, reproducible measurement tool (fixed scenarios, warmup/sample windows, CSV) instead of visual impressions.
 
 ---
 
-## Результаты бенчмарка
+## 3. Please pay special attention to
 
-Автоматический режим `--perf-sweep`, сравнение single-GPU vs multi-GPU:
+Tools / work-efficiency side first:
 
-| Scenario | Single FPS | Multi FPS | FPS Gain | Gain % | Speedup |
-|---|---:|---:|---:|---:|---:|
-| baseline_mixed_lod | 49.27 | 88.82 | +39.55 | +80.27% | 1.80x |
-| lod0_heavy | 44.67 | 92.75 | +48.08 | +107.63% | 2.08x |
-| lod1_favoring | 43.92 | 81.08 | +37.16 | +84.61% | 1.85x |
-| dense_mixed | 20.50 | 50.92 | +30.42 | +148.39% | 2.48x |
-| ultra_dense_lod0_heavy | 13.25 | 32.69 | +19.44 | +146.72% | 2.47x |
-| **Overall (arithmetic mean)** | **34.32** | **69.25** | **+34.93** | **+113.52%** | **2.14x** |
+**A) Automated performance sweep**
 
-Multi-GPU стабильно быстрее во всех сценариях: **1.80x–2.48x**, в среднем **~2.14x**.
+- `MGPU-GrassSim/Source.cpp` (`--perf-sweep` / `--perf-test`)
+- `MGPU-GrassSim/HybridGrassSimApp.cpp` (`EnablePerformanceSweepMode`, CSV writers)
+- Output: `grass-perf-sweep-results.csv` (mean ~2.14× — table above)
 
----
+**B) Hybrid grass pipeline**
 
-## Ключевые файлы
+- `Common/CrossAdapterGrassEmitter.h` / `.cpp`
+- `MGPU-GrassSim/Shaders/ComputeGrass.hlsl`
+- `MGPU-GrassSim/Shaders/GrassDraw.hlsl`
 
-```
-Common/
-  CrossAdapterGrassEmitter.{h,cpp}   # multi-GPU grass pipeline
-  WindFluidSimulator.{h,cpp}         # GPU wind simulation
-  GrassEmitter.{h,cpp}             # grass data & LOD
-MGPU-GrassSim/
-  HybridGrassSimApp.{h,cpp}          # demo app, ImGui, benchmarks
-  Shaders/
-    ComputeGrass.hlsl              # expand, cull, wind sampling
-    GrassDraw.hlsl                 # LOD0 tessellation + LOD1 billboards
-    WindFluid*.hlsl                # Navier-Stokes passes
-Graphics/
-  GCrossAdapterResource.*          # cross-adapter resource sharing (base)
-```
+**C) Research UI + wind**
+
+- ImGui panels in `HybridGrassSimApp`
+- `Common/WindFluidSimulator.h` / `.cpp`, `WindFluid*.hlsl`
+
+Commit → feature map: [CONTRIBUTIONS.md](CONTRIBUTIONS.md).
 
 ---
 
-## Благодарности и лицензия
+## 4. Referenced / third-party source material
 
-- **Base framework:** [Mikhanil/Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12) — multi-GPU DX12 engine samples (Shared Shadow Map, Shared UI, Shared Particles, Shared Hybrid Compute).
-- **ImGui:** [ocornut/imgui](https://github.com/ocornut/imgui) (submodule).
-- **Frank Luna / DX12 samples** — часть утилит и структуры проекта в базовом репозитории.
+Full list: [NOTICE.md](NOTICE.md).
 
-Grass simulation, wind fluid, LOD pipeline, benchmarks и документация в этом репозитории — **авторская часть дипломной работы**.
+**Base framework (upstream)** — [Mikhanil/Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12)
+
+- `Graphics/*`, `Allocator/*`, most of `Common/*` app/scene/particle core
+- Sample apps other than `MGPU-GrassSim` (e.g. `MGPU-Particles`, `MGPU-SFR`, …)
+- `Utils/d3dx12.h` (Microsoft), `Utils/d3dUtil.*` (helpers; MiniEngine notes in file)
+
+**Libraries** — Dear ImGui (`Submodule/imgui`); NuGet: assimp-v143, DirectXTK12, DirectXMesh, DirectXTex, WinPixEventRuntime
+
+**Scene assets** — `MGPU-GrassSim/Data/Objects/*` (DoomSlayer, Nanosuit, P-Body, Atlas, dragons, StoneGolem, Temple, …)
+
+Fork-specific files: section 3 and [CONTRIBUTIONS.md](CONTRIBUTIONS.md).
 
 ---
 
-## English
+## Final Thoughts
 
-**Multi-GPU Grass Rendering** — a master's thesis project: large-scale real-time grass with DirectX 12 cross-adapter workload split between discrete and integrated GPUs.
+This started as a graphics research problem and became more useful once measurement was part of the product: fixed scenarios, warmup windows, CSV output, ImGui knobs for fast iteration. Still a thesis codebase, not a shipping engine — but a concrete loop for tools-minded work: find friction, propose a split, instrument it, show the numbers.
 
-Built on top of [Multi-GPU-Render-DX12](https://github.com/Mikhanil/Multi-GPU-Render-DX12). Original repo provides the multi-GPU framework; **this fork adds** grass rendering, GPU Navier–Stokes wind, LOD system, ImGui tooling, and automated single vs multi-GPU benchmarks (~**2.14x** mean speedup).
+https://github.com/averseble/Multi-GPU-Render-DX12-master
 
-**Build:** clone with submodules → open `DX12.sln` → build **`MGPU-GrassSim`** → run `MGPU-GrassSim.exe` or `--perf-sweep` for benchmarks.
+---
 
-**Contact:** [github.com/averseble](https://github.com/averseble)
+`DirectX12` `C++` `HLSL` `Multi-GPU` `Tools` `ImGui`
